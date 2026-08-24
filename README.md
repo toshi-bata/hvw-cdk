@@ -121,7 +121,7 @@ aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws ss
 | `volumeSize`      | `30`          | ルート EBS サイズ (GiB) |
 | `allowedSshCidr`  | `0.0.0.0/0`   | SSH(22) を許可する CIDR。**自分のグローバル IP に絞る事を推奨**（下記参照） |
 | `keyName`         | （未指定）    | 既存の EC2 キーペア名。未指定なら Session Manager で接続 |
-| `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定なら手動 SCP）。環境変数 `HVW_SDK_URL` でも指定可 |
+| `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定ならインフラのみ構築）。環境変数 `HVW_SDK_URL` でも指定可 |
 
 ### 自分のグローバル IP の調べ方（`allowedSshCidr` 用）
 
@@ -167,35 +167,24 @@ npx cdk deploy \
 > インスタンス（例 `g4dn.xlarge`）が必要です。サンプルの `csr`（クライアント
 > サイドレンダリング）だけなら `t3.large` 程度で動作します。
 
-## SDK インストール方法：自動 or 手動
+## SDK の自動インストール
 
-HVW SDK 本体（tar.gz、非公開・ライセンス取得者のみ）の設置には 2 通りあります。
-
-### 方法 A：自動インストール（推奨・SCP 不要）
-
-Developer Zone の署名付き S3 URL などを `HVW_SDK_URL` で渡すと、UserData が
-ダウンロード〜展開〜配置〜`Config.js` 設定〜サーバ起動まで自動で行います。
-
-環境変数 `HVW_SDK_URL`（または context `sdkUrl`）に URL をセットしてから
-デプロイするだけです。**具体的なコマンドは下記「デプロイ手順」に一本化**して
-います。デプロイ完了後、UserData が SDK を取得・設置するため**さらに 2〜5 分**
-待ってから `http://<ElasticIP>/sample.html` を開きます。
+HVW SDK 本体（tar.gz、非公開・ライセンス取得者のみ）は、Developer Zone の
+署名付き S3 URL を `HVW_SDK_URL`（または context `sdkUrl`）で渡すだけで、
+UserData がダウンロード〜展開〜配置〜`Config.js` 設定〜サーバ起動まで自動で
+行います（SCP 不要）。具体的なコマンドは下記「デプロイ手順」を参照してください。
 
 > **注意**：署名付き URL は有効期限付き（通常数時間）かつ署名を含むため、
 > **リポジトリにコミットしないでください**。デプロイ時のみ環境変数で渡します。
 > URL は EC2 の UserData に埋め込まれるため、PoC / 検証用途を想定しています。
-> この方法 A では「デプロイ後の手順（手動 / 方法 B）」のステップは不要です。
 
-### 方法 B：手動インストール（`sdkUrl` を渡さない場合）
-
-`HVW_SDK_URL` を指定せずにデプロイすると、インフラ（NGINX / リバースプロキシ
-/ systemd）のみ構築されます。SDK は下記「デプロイ後の手順」に従い SCP で転送
-して設置します。
+> `HVW_SDK_URL` を指定せずにデプロイした場合は、インフラ（NGINX / リバース
+> プロキシ / systemd）のみが構築され、SDK は設置されません（`onboot.service` は
+> enable 済みのため、後から手動で SDK を `/opt/hvw` に置いて起動できます）。
 
 ## デプロイ手順
 
-クローン直後から通しで実行する例（PowerShell）。方法 A（自動）と方法 B（手動）の
-違いは、手順 4 で `HVW_SDK_URL` をセットするかどうかだけです。
+クローン直後から通しで実行する例（PowerShell）です。
 
 ```powershell
 # 1. リポジトリへ移動して依存をインストール（初回のみ）
@@ -210,8 +199,7 @@ aws sts get-caller-identity   # 疎通確認（アカウント/ロールが返�
 # 3. （初回のみ）CDK bootstrap ※実施済みならスキップ
 #    npx cdk bootstrap aws://<ACCOUNT_ID>/ap-northeast-1
 
-# 4. 【方法 A のみ】SDK の署名付き URL をセット（& を含むためシングルクォート必須）
-#    方法 B（手動 SCP）で進める場合はこの行を実行しない
+# 4. SDK の署名付き URL をセット（& を含むためシングルクォート必須）
 $env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz?X-Amz-...'
 
 # 5. デプロイ（keyName / allowedSshCidr は上記「設定」で調べた自分の値に置換）
@@ -228,7 +216,7 @@ bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'
 - `SampleUrl` … サンプル URL（SDK 設置後にアクセス可能）
 
 > **重要（少し待つ）**：`cdk deploy` 完了直後は、まだ EC2 内部で
-> **SDK のダウンロード・展開・配置（方法 A）や apt のセットアップが進行中**です。
+> **SDK のダウンロード・展開・配置や apt のセットアップが進行中**です。
 > `ElasticIP` が表示されても、ビューワにアクセスできるまで**通常 3〜5 分**かかります。
 > 早すぎると `hoops-web-viewer.mjs` が **404** になったり真っ白になります。
 > **数分待ってから**ブラウザを再読込してください。進捗は SSH で
@@ -239,11 +227,9 @@ bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'
 > 再デプロイすると**インスタンスが置換され InstanceId が変わります**（bootstrap を
 > 再実行させるための意図的な挙動）。同様に初回起動待ちが発生します。
 
-## デプロイ後の手順（手動 / 方法 B の場合のみ）
+## サーバへの接続（トラブルシュート）
 
-> `HVW_SDK_URL` を指定して自動インストール（方法 A）した場合、この節は不要です。
-
-### 1. サーバへ接続
+デプロイ後の確認やログ調査でサーバに入りたい場合:
 
 キーペア指定時:
 
@@ -257,78 +243,24 @@ ssh -i <path-to-your-key>.pem ubuntu@<ElasticIP>
 aws ssm start-session --target <InstanceId>
 ```
 
-### 2. HVW SDK 本体を転送・設置
+### ログ・状態の確認
 
-ローカル PC から SCP で tar.gz を `/tmp` に転送します。
-
-```bash
-scp -i <key>.pem HOOPS_Visualize_Web_202x.x.x_Linux_xxx.tar.gz ubuntu@<ElasticIP>:/tmp/
-```
-
-サーバ側で展開し、SDK ツリーを `/opt/hvw` に、静的アセットのみ
-`/var/www/html` に配置します（本プロジェクトの配置設計どおり）。
+自動インストールの進捗やサーバ状態は次で確認できます。
 
 ```bash
-cd /tmp
-tar -zxvf HOOPS_Visualize_Web_202x.x.x_Linux_xxx.tar.gz
+# UserData / SDK 自動インストールのログ（"HVW SDK installed ... started." で完了）
+sudo tail -n 50 /var/log/cloud-init-output.log
 
-# SDK ツリー丸ごとを /opt/hvw に置き、current シンボリックリンクを張る
-sudo mkdir -p /opt/hvw
-sudo cp -r HOOPS_Visualize_Web_202x.x.x /opt/hvw/
-sudo ln -sfn /opt/hvw/HOOPS_Visualize_Web_202x.x.x /opt/hvw/current
+# SC サーバ（onboot.service）の状態と待受ポート
+sudo systemctl status onboot.service --no-pager
+sudo ss -ltnp | grep -E '11182|11180'
 
-# NGINX が配信する静的アセットだけを /var/www/html にコピー
-cd /opt/hvw/current/web_viewer/
-sudo cp -r demo-app /var/www/html/
-sudo cp hoops-web-viewer.mjs engine.esm.wasm /var/www/html/
+# 静的アセットと SDK ツリーの配置確認
+ls -l /var/www/html /opt/hvw/current/web_viewer/
 ```
 
-`Config.js` でストリーミングモデルの検索ディレクトリを設定します（`.scz` が
-置かれている SDK ツリー内の絶対パスを指定）。
-
-```bash
-sudo vi /opt/hvw/current/server/node/Config.js
-```
-
-```js
-    modelDirs: [
-        "/opt/hvw/current/quick_start/converted_models/standard/sc_models",
-    ],
-```
-
-> リバースプロキシ経由のため、`Config.js` の SSL 設定は不要です（WSS は NGINX で
-> 終端され、WS として SC サーバへ届きます）。
-
-### 3. HVW サーバを起動
-
-UserData で `onboot.service` は enable 済みです。SDK 設置後は起動できます。
-
-```bash
-sudo systemctl start onboot.service
-sudo systemctl status onboot.service
-```
-
-（再起動時は自動起動します。）
-
-### 4. 動作確認（HTTP）
-
-サンプル `sample.html` は、ページが HTTP なら `ws://`、HTTPS なら `wss://` で
-自動接続します。まずは HTTP で確認できます。
-
-```
-http://<ElasticIP>/sample.html
-```
-
-microengine モデルが表示されれば成功です。この時点では SSL 証明書もドメインも
-不要で、パス方式（`/wsproxy/11182`）で SC サーバに接続します。
-
-> **demo-app（フル機能デモ）を使う場合**：現行の demo-app は URL パラメータで
-> 設定します。ヘッダ方式のプロキシ経由でストリーミングするには `scPort` に
-> 公開ポート（HTTP なら `80`、HTTPS なら `443`）を渡します。
-> ```
-> http://<ElasticIP>/demo-app/?viewer=csr&scPort=80&model=microengine
-> ```
-> SC サーバ不要のローカル SCS モードは `?viewer=scs&model=models/scs/<name>.scs`。
+ビューワの入口 URL は上記「ビューワの入口」を参照してください
+（`/sample.html` と `/demo-app/?viewer=csr&scPort=80&model=microengine`）。
 
 ## （任意）HTTPS 化：ドメイン取得 + certbot
 
