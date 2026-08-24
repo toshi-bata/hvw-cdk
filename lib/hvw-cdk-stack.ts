@@ -92,6 +92,20 @@ export class HvwCdkStack extends cdk.Stack {
     );
     const userData = ec2.UserData.custom(userDataScript);
 
+    // Optionally automate the SDK install. When an SDK download URL is supplied
+    // (context `sdkUrl` or env var HVW_SDK_URL), append a step that downloads,
+    // extracts, places and starts the HVW SDK — no manual SCP required. The URL
+    // is a short-lived presigned link and is intentionally NOT committed; pass
+    // it at deploy time. When omitted, follow the manual SCP steps in the README.
+    const sdkUrl = (this.node.tryGetContext('sdkUrl') as string) ?? process.env.HVW_SDK_URL;
+    if (sdkUrl) {
+      const installScript = fs.readFileSync(
+        path.join(__dirname, '..', 'assets', 'install-sdk.sh'),
+        'utf8',
+      );
+      userData.addCommands(`export HVW_SDK_URL='${sdkUrl}'`, installScript);
+    }
+
     // Optional existing EC2 key pair for SSH access.
     const keyPair = keyName
       ? ec2.KeyPair.fromKeyPairName(this, 'HvwKeyPair', keyName)

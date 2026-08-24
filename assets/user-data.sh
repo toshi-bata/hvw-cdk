@@ -22,7 +22,7 @@ apt-get upgrade -y
 apt-get install -y \
     nginx \
     certbot python3-certbot-nginx \
-    unzip build-essential \
+    unzip build-essential curl \
     libglu1-mesa mesa-utils xserver-xorg xinit
 
 # 2. Web root directories expected by the article

@@ -39,6 +39,7 @@ NGINX のリバースプロキシで WSS→WS を中継することで、Stream 
 | `volumeSize`      | `30`          | ルート EBS サイズ (GiB) |
 | `allowedSshCidr`  | `0.0.0.0/0`   | SSH(22) を許可する CIDR。**自分の IP に絞る事を推奨** |
 | `keyName`         | （未指定）    | 既存の EC2 キーペア名。未指定なら Session Manager で接続 |
+| `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定なら手動 SCP）。環境変数 `HVW_SDK_URL` でも指定可 |
 
 例:
 
@@ -52,6 +53,41 @@ npx cdk deploy \
 > **GPU について**：サーバサイドレンダリング（SSR）を使う場合は GPU 付き
 > インスタンス（例 `g4dn.xlarge`）が必要です。サンプルの `csr`（クライアント
 > サイドレンダリング）だけなら `t3.large` 程度で動作します。
+
+## SDK インストール方法：自動 or 手動
+
+HVW SDK 本体（tar.gz、非公開・ライセンス取得者のみ）の設置には 2 通りあります。
+
+### 方法 A：自動インストール（推奨・SCP 不要）
+
+Developer Zone の署名付き S3 URL などを `HVW_SDK_URL` で渡すと、UserData が
+ダウンロード〜展開〜配置〜`Config.js` 設定〜サーバ起動まで自動で行います。
+
+PowerShell の場合（URL に `&` を含むためシングルクォート必須）:
+
+```powershell
+$env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz?X-Amz-...'
+npx cdk deploy -c keyName=my-keypair -c allowedSshCidr=203.0.113.10/32
+```
+
+bash の場合:
+
+```bash
+export HVW_SDK_URL='https://.../HOOPS_Visualize_Web_..._Linux_x86-64.tar.gz?X-Amz-...'
+npx cdk deploy -c keyName=my-keypair -c allowedSshCidr=203.0.113.10/32
+```
+
+> **注意**：署名付き URL は有効期限付き（通常数時間）かつ署名を含むため、
+> **リポジトリにコミットしないでください**。デプロイ時のみ環境変数で渡します。
+> URL は EC2 の UserData に埋め込まれるため、PoC / 検証用途を想定しています。
+> デプロイ後は `http://<ElasticIP>/sample.html` を開くだけで確認できます
+> （下記「デプロイ後の手順」の手動ステップは不要）。
+
+### 方法 B：手動インストール（`sdkUrl` を渡さない場合）
+
+`HVW_SDK_URL` を指定せずにデプロイすると、インフラ（NGINX / リバースプロキシ
+/ systemd）のみ構築されます。SDK は下記「デプロイ後の手順」に従い SCP で転送
+して設置します。
 
 ## デプロイ手順
 
@@ -69,7 +105,9 @@ npx cdk deploy
 - `SshCommand` … SSH 接続コマンド（keyName 指定時）
 - `SampleUrl` … サンプル URL（SDK 設置後にアクセス可能）
 
-## デプロイ後の手順（手動）
+## デプロイ後の手順（手動 / 方法 B の場合のみ）
+
+> `HVW_SDK_URL` を指定して自動インストール（方法 A）した場合、この節は不要です。
 
 ### 1. サーバへ接続
 
@@ -204,6 +242,7 @@ hvw-cdk/
 ├── bin/hvw-cdk.ts            # CDK アプリのエントリ
 ├── lib/hvw-cdk-stack.ts      # スタック定義（VPC/SG/EC2/EIP/IAM）
 ├── assets/user-data.sh       # EC2 ブートストラップ（NGINX/certbot/systemd）
+├── assets/install-sdk.sh     # SDK 自動ダウンロード・設置（sdkUrl 指定時に実行）
 ├── test/hvw-cdk.test.ts      # スタックの簡易テスト
 └── README.md
 ```
