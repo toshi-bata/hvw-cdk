@@ -264,10 +264,17 @@ ls -l /var/www/html /opt/hvw/current/web_viewer/
 
 ## （任意）HTTPS 化：ドメイン取得 + certbot
 
-本番運用で暗号化したい場合は、ドメインを用意して Let's Encrypt 証明書を発行します。
-IP アドレスには証明書を発行できないため、独自ドメインが必須です。
+本番運用で暗号化したい場合は、Let's Encrypt 証明書を certbot で発行します。
+certbot + Let's Encrypt は 2026 年時点でも主流の手法です（下記「代替手段」も参照）。
 
-### A. ドメイン取得と DNS 設定
+> **ドメイン無しでも可能に**：かつては「IP アドレスには証明書を発行できない」
+> ため独自ドメインが必須でしたが、2025〜2026 年に Let's Encrypt が
+> **IP アドレス証明書**を一般提供しました（`http-01` / `tls-alpn-01` で検証）。
+> ただし**有効期間 6 日の短命証明書**で、**自動更新が必須**です。最新版 certbot の
+> `shortlived` プロファイルで Elastic IP のまま HTTPS 化できます。安定運用には
+> 引き続き独自ドメイン（90 日証明書・自動更新）が無難です。
+
+### A. ドメイン取得と DNS 設定（ドメイン利用時）
 
 `ElasticIP` を指す A レコードを作成します（Route 53 など）。
 `dig <YOUR_DOMAIN>` で Elastic IP が返ることを確認してください。
@@ -282,13 +289,23 @@ sudo certbot --nginx -d <YOUR_DOMAIN> -m <YOUR_EMAIL> --agree-tos
 
 certbot が NGINX に 443 の server ブロックと HTTP→HTTPS リダイレクトを追加します。
 本プロジェクトのリバースプロキシ設定・`.mjs` MIME 設定は保持されます。
-`sample.html` は自動で `wss://` に切り替わります。
+`sample.html` は自動で `wss://` に切り替わります。demo-app はヘッダ方式で
+`?viewer=csr&scPort=443&model=microengine` を使います。
 
 ### C. 動作確認（HTTPS）
 
 ```
 https://<YOUR_DOMAIN>/sample.html
 ```
+
+### 代替手段（参考）
+
+| 方式 | 特徴 | 向き |
+| --- | --- | --- |
+| **certbot + Let's Encrypt**（本手順） | 無料・枯れている・IP 証明書 / 6 日証明書対応 | 単一 VM（本構成） |
+| **Caddy**（NGINX 代替） | HTTPS の取得・更新を内蔵し完全自動 | 単一ボックスを最小構成で |
+| **ACM + ALB / CloudFront** | AWS が TLS 終端・自動更新。証明書を EC2 に置かない | AWS ネイティブ（ALB は月額課金増） |
+| **acme.sh** | 軽量なシェル ACME クライアント | certbot 依存を避けたい場合 |
 
 ## リバースプロキシの仕組み（参考）
 
