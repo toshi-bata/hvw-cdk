@@ -83,6 +83,21 @@ aws sso login --profile hvw       # デプロイ前にログイン（トーク�
 aws sts get-caller-identity --profile hvw   # 疎通確認
 ```
 
+各コマンドの実行頻度と保存場所は次のとおりです。
+
+| コマンド / 設定 | 実行頻度 | 保存場所・有効範囲 |
+| --- | --- | --- |
+| `aws configure sso --profile hvw` | このマシンで**一度だけ** | `~/.aws/config`（ディスク） |
+| `aws sso login --profile hvw` | **トークン失効時のみ**（数時間ごと） | `~/.aws/sso/cache`（ディスク・**全ウィンドウ共通**） |
+| `$env:AWS_PROFILE = "hvw"`（または各コマンドに `--profile hvw`） | **ターミナルを開くたび** | 環境変数（**そのウィンドウのみ**） |
+
+> **よくあるハマり**：`aws sso login` に成功しても、後続コマンドに `--profile hvw`
+> も `$env:AWS_PROFILE` も付けないと、既定プロファイル（認証情報なし）を見て
+> `NoCredentials: Unable to locate credentials` になります。**ログイン＝トークン取得**と
+> **プロファイル指定＝どの認証情報を使うか**は別物です。新しいウィンドウでは、まず
+> `$env:AWS_PROFILE = "hvw"` を設定してから `aws sts get-caller-identity` で確認する
+> のが確実です（`NoCredentials`/`expired` が出た時だけ `aws sso login` を足す）。
+
 > **落とし穴（重要）**：`aws configure sso` で聞かれる **SSO region** は、
 > **IAM Identity Center が設置されたリージョン**であり、HVW をデプロイする
 > リージョン（本手順では `ap-northeast-1`）とは**別物**です。ここを取り違えると
@@ -91,10 +106,12 @@ aws sts get-caller-identity --profile hvw   # 疎通確認
 > ログインした際のブラウザ（F12 → Network の `portal.sso.<region>.amazonaws.com`）
 > で確認するか、管理者に確認してください。
 
-各コマンドでは `--profile hvw` を付けるか、`$env:AWS_PROFILE = "hvw"`（PowerShell）
-/ `export AWS_PROFILE=hvw`（bash）を設定します。環境変数は**ターミナルを開くたび**に
-再設定が必要（そのウィンドウ内のみ有効）です。`aws configure sso` は再実行不要、
-`aws sso login` はトークン失効時のみ実行します。
+新しいターミナルでの定番手順（このウィンドウのみ有効）:
+
+```powershell
+$env:AWS_PROFILE = "hvw"
+aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws sso login --profile hvw
+```
 
 ## 設定（context で上書き可能）
 

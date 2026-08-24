@@ -122,6 +122,7 @@ export class HvwCdkStack extends cdk.Stack {
       securityGroup: sg,
       role,
       userData,
+      userDataCausesReplacement: true,
       keyPair,
       blockDevices: [
         {
