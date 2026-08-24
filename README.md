@@ -1,12 +1,51 @@
 # hvw-cdk — HOOPS Visualize Web + リバースプロキシ を AWS CDK で構築
 
-TechSoft3D フォーラム記事
-[HOOPS Visualize Web HTTPS server with reverse proxy](https://forum.techsoft3d.com/t/hoops-visualize-web-https-server-with-reverse-proxy/1682)
-（および前提記事 [How to setup HTTPS server with AWS](https://forum.techsoft3d.com/t/how-to-setup-https-server-with-aws/1680)）
-の構成を、AWS CDK (TypeScript) で自動化するプロジェクトです。
+HOOPS Visualize Web（HVW）の Stream Cache サーバを、NGINX リバースプロキシの
+背後に配置して構築する AWS CDK (TypeScript) プロジェクトです。SC サーバの
+`11182` ポートを**インターネットに公開せず**、80/443 経由でストリーミング配信
+します。SDK のダウンロード・設置まで自動化しているのが特徴です。
 
-NGINX のリバースプロキシで WSS→WS を中継することで、Stream Cache サーバの
-`11182` ポートをインターネットに公開せずに HTTPS 配信できます。
+構成の着想は TechSoft3D フォーラム記事
+[HOOPS Visualize Web HTTPS server with reverse proxy](https://forum.techsoft3d.com/t/hoops-visualize-web-https-server-with-reverse-proxy/1682)
+（前提記事 [How to setup HTTPS server with AWS](https://forum.techsoft3d.com/t/how-to-setup-https-server-with-aws/1680)）
+に由来しますが、配置・プロキシ方式・自動化は本プロジェクト独自に再設計しています。
+
+## リバースプロキシの 2 方式
+
+`11182` を隠蔽したまま、2 種類のクライアントに対応します。
+
+- **ヘッダ方式（現代版・クライアント非依存）**：標準ポート（80/443）のルート `/`
+  に来た **WebSocket アップグレード要求**だけを `127.0.0.1:11182` へ中継し、
+  それ以外は静的ファイルを配信します。接続先を `host:port`（パス無し）でしか
+  組み立てられない**現行の demo-app** でも、`scPort=80`（HTTPS なら `443`）を
+  渡すだけでプロキシ経由ストリーミングが動きます。
+- **パス方式（古典・記事準拠）**：`/wsproxy/<port>` で中継します。同梱の
+  `sample.html` や、接続先をパスで指定できる従来クライアント向けです。
+
+どちらも `11182` は非公開のままです。
+
+## 配置設計
+
+SDK の相対構成を崩さないよう、サーバ本体と静的アセットを分離しています。
+
+| パス | 内容 | 配信元 |
+| --- | --- | --- |
+| `/opt/hvw/HOOPS_Visualize_Web_<ver>/` | SDK ツリー丸ごと。SC サーバはここから起動 | systemd `onboot.service` |
+| `/opt/hvw/current` | 上記への symlink（バージョン更新を容易に） | — |
+| `/var/www/html/` | 静的アセットのみ（`demo-app/`, `hoops-web-viewer.mjs`, `engine.esm.wasm`, `sample.html`） | NGINX |
+
+ストリーミングモデル（`.scz`）は SDK ツリー内に残し、SC サーバが `Config.js` の
+`modelDirs` 経由で配信します（NGINX では配信しません）。
+
+## ビューワの入口
+
+SDK インストール完了後、以下にアクセスできます。
+
+- `http://<ElasticIP>/sample.html` … 最小サンプル（パス方式のストリーミング）
+- `http://<ElasticIP>/demo-app/?viewer=csr&scPort=80&model=microengine`
+  … SDK 同梱のフル機能デモ（ヘッダ方式のストリーミング / csr）。HTTPS なら
+  `viewer=csr&scPort=443`。ローカル SCS ファイルを直接開く場合は
+  `?viewer=scs&model=models/scs/<name>.scs`（SC サーバ不要）。
 
 ## CDK が作成するもの
 
@@ -14,15 +53,15 @@ NGINX のリバースプロキシで WSS→WS を中継することで、Stream 
 - セキュリティグループ：**22 / 80 / 443 のみ**（`11182` は非公開）
 - Ubuntu Server 24.04 LTS の EC2 インスタンス
   - UserData で NGINX・certbot を導入
-  - リバースプロキシ設定（`/wsproxy/<port>`, `/httpproxy/<port>/<path>`）
+  - リバースプロキシ設定（ヘッダ方式の `/` + パス方式 `/wsproxy/<port>`, `/httpproxy/<port>/<path>`）
   - `.mjs` の MIME タイプ追加
   - 最小サンプル `sample.html` 配置
   - 起動時に HVW サーバを立ち上げる systemd サービス `onboot.service`
 - Elastic IP（インスタンスに関連付け。ドメインの A レコード先に使用）
 - Session Manager 接続用の IAM ロール（SSH 鍵なしでも接続可）
 
-> **手動で行う手順**：ドメイン取得、HVW SDK 本体（tar.gz）の転送・設置、
-> certbot による SSL 証明書発行。理由は下記「デプロイ後の手順」を参照。
+> **手動で行う手順**：ドメイン取得、certbot による SSL 証明書発行。
+> HVW SDK 本体は `HVW_SDK_URL` を渡せば自動設置されます（下記「デプロイ手順」参照）。
 
 ## 前提
 
@@ -197,28 +236,34 @@ aws ssm start-session --target <InstanceId>
 scp -i <key>.pem HOOPS_Visualize_Web_202x.x.x_Linux_xxx.tar.gz ubuntu@<ElasticIP>:/tmp/
 ```
 
-サーバ側で展開し、`/var/www` 以下へ配置します（記事の構成どおり）。
+サーバ側で展開し、SDK ツリーを `/opt/hvw` に、静的アセットのみ
+`/var/www/html` に配置します（本プロジェクトの配置設計どおり）。
 
 ```bash
 cd /tmp
 tar -zxvf HOOPS_Visualize_Web_202x.x.x_Linux_xxx.tar.gz
-cd HOOPS_Visualize_Web_202x.x.x/
 
-sudo cp -r 3rd_party/ server/ /var/www/
-sudo cp -r quick_start/converted_models/standard/sc_models/ /var/www/
-cd web_viewer/
-sudo cp -r demo-app hoops-web-viewer.mjs engine.esm.wasm /var/www/html/
+# SDK ツリー丸ごとを /opt/hvw に置き、current シンボリックリンクを張る
+sudo mkdir -p /opt/hvw
+sudo cp -r HOOPS_Visualize_Web_202x.x.x /opt/hvw/
+sudo ln -sfn /opt/hvw/HOOPS_Visualize_Web_202x.x.x /opt/hvw/current
+
+# NGINX が配信する静的アセットだけを /var/www/html にコピー
+cd /opt/hvw/current/web_viewer/
+sudo cp -r demo-app /var/www/html/
+sudo cp hoops-web-viewer.mjs engine.esm.wasm /var/www/html/
 ```
 
-`Config.js` でモデル検索ディレクトリを設定します。
+`Config.js` でストリーミングモデルの検索ディレクトリを設定します（`.scz` が
+置かれている SDK ツリー内の絶対パスを指定）。
 
 ```bash
-sudo vi /var/www/server/node/Config.js
+sudo vi /opt/hvw/current/server/node/Config.js
 ```
 
 ```js
     modelDirs: [
-        "./sc_models",
+        "/opt/hvw/current/quick_start/converted_models/standard/sc_models",
     ],
 ```
 
@@ -246,14 +291,15 @@ http://<ElasticIP>/sample.html
 ```
 
 microengine モデルが表示されれば成功です。この時点では SSL 証明書もドメインも
-不要で、リバースプロキシ経由（`/wsproxy/11182`）で SC サーバに接続します。
+不要で、パス方式（`/wsproxy/11182`）で SC サーバに接続します。
 
-> `demo-app` を使う場合は `Router.js` の `wsUriRoot` の `:` を `/wsproxy/` に
-> 変更してから以下を開きます。
-> ```bash
-> sudo vi /var/www/html/demo-app/app/Router.js
-> # 例）http://<ElasticIP>/demo-app/index.html?viewer=csr&model=arboleda&wsPort=11182
+> **demo-app（フル機能デモ）を使う場合**：現行の demo-app は URL パラメータで
+> 設定します。ヘッダ方式のプロキシ経由でストリーミングするには `scPort` に
+> 公開ポート（HTTP なら `80`、HTTPS なら `443`）を渡します。
 > ```
+> http://<ElasticIP>/demo-app/?viewer=csr&scPort=80&model=microengine
+> ```
+> SC サーバ不要のローカル SCS モードは `?viewer=scs&model=models/scs/<name>.scs`。
 
 ## （任意）HTTPS 化：ドメイン取得 + certbot
 
@@ -285,15 +331,16 @@ https://<YOUR_DOMAIN>/sample.html
 
 ## リバースプロキシの仕組み（参考）
 
-`/etc/nginx/sites-available/default` に以下のロケーションを設定しています。
+`/etc/nginx/sites-available/default` に以下を設定しています。
 
-- `/wsproxy/<port>` → `ws://127.0.0.1:<port>`（WebSocket, Upgrade ヘッダ付き）
+- **ヘッダ方式**：`location /` で `Upgrade: websocket` の要求のみ
+  `http://127.0.0.1:11182` へ中継し、それ以外は静的配信（`try_files`）。
+  demo-app（`ws://host:<80|443>/?...`）はこれで動きます。
+- **パス方式**：`/wsproxy/<port>` → `ws://127.0.0.1:<port>`（sample.html 用）
 - `/httpproxy/<port>/<path>` → `http://127.0.0.1:<port>/<path>`
 - `client_max_body_size 200M;`
 
-クライアントは
-`ws://<host>/wsproxy/11182`（HTTPS 時は `wss://`）
-へ接続し、NGINX が `ws://127.0.0.1:11182` へ中継します。
+いずれの方式でも `11182` は公開せず、NGINX が `127.0.0.1:11182` へ中継します。
 
 ## 後始末
 

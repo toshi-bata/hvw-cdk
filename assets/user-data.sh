@@ -2,16 +2,22 @@
 #
 # HOOPS Visualize Web (HVW) server - EC2 bootstrap (Ubuntu 24.04 LTS)
 #
-# Based on the TechSoft3D articles:
-#   "HOOPS Visualize Web HTTPS server with reverse proxy" (forum topic 1682)
-#   and its prerequisite "How to setup HTTPS server with AWS" (topic 1680).
+# Sets up an NGINX front end that:
+#   * serves the static web assets from /var/www/html, and
+#   * reverse-proxies the WebSocket streaming connection to the private SC
+#     server on 127.0.0.1:11182, so port 11182 is never exposed publicly.
 #
-# Installs NGINX + certbot, configures the reverse proxy, adds the mjs MIME
-# type, deploys a minimal sample.html, and registers the systemd boot service.
+# Two proxy styles are configured so both viewer clients work:
+#   1. Header-based routing at "/" (modern): a WebSocket-upgrade request to the
+#      normal HTTP(S) port is forwarded to 11182, everything else is served as
+#      a static file. This lets the current demo-app (which connects to
+#      host:port, path-less) stream through the proxy - just pass scPort=80/443.
+#   2. Path-based routing "/wsproxy/<port>" (classic, from the TechSoft3D forum
+#      article): kept for the bundled sample.html and older clients.
 #
-# NOTE: The HOOPS Visualize Web SDK (tar.gz) is proprietary and is NOT
-# downloaded here. After deployment, transfer it via SCP and run setup
-# (see README, "Post-deploy: install the HVW SDK").
+# The proprietary HVW SDK is NOT downloaded here. It is either installed
+# automatically by assets/install-sdk.sh (when HVW_SDK_URL is supplied at deploy
+# time) or transferred manually (see README).
 #
 set -eux
 export DEBIAN_FRONTEND=noninteractive
@@ -25,8 +31,8 @@ apt-get install -y \
     unzip build-essential curl \
     libglu1-mesa mesa-utils xserver-xorg xinit
 
-# 2. Web root directories expected by the article
-mkdir -p /var/www/html
+# 2. Directories: static web root and the SDK install root
+mkdir -p /var/www/html /opt/hvw
 
 # 3. Add the mjs MIME type as a conf.d snippet (survives certbot edits)
 cat > /etc/nginx/conf.d/mjs.conf <<'MJS_EOF'
@@ -35,8 +41,15 @@ types {
 }
 MJS_EOF
 
-# 4. NGINX reverse-proxy site (port 80; certbot adds the 443 block later)
+# 4. NGINX front end (port 80; certbot adds the 443 block later)
 cat > /etc/nginx/sites-available/default <<'NGINX_EOF'
+# Map the Upgrade header so WebSocket connections keep the "upgrade" token
+# while plain requests send a "close" connection.
+map $http_upgrade $hvw_connection {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -45,16 +58,27 @@ server {
     index index.html index.htm;
     server_name _;
 
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection $hvw_connection;
+    proxy_set_header Host       $host;
+    proxy_read_timeout          86400s;
+
+    # Modern, client-agnostic routing: a WebSocket upgrade on the standard port
+    # goes to the private SC server; any other request is served statically.
+    # Works with the current demo-app (ws://host:<80|443>/?renderingLocation=..).
     location / {
+        if ($http_upgrade = websocket) {
+            proxy_pass http://127.0.0.1:11182;
+        }
         try_files $uri $uri/ =404;
     }
 
+    # Classic path-based reverse proxy (forum article style). Used by sample.html
+    # and any client that targets ws(s)://host/wsproxy/<port>.
     location /wsproxy/ {
         rewrite /wsproxy/([^/]+) / break;
         proxy_pass http://127.0.0.1:$1;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
     }
 
     location /httpproxy/ {
@@ -69,7 +93,8 @@ NGINX_EOF
 nginx -t
 systemctl reload nginx
 
-# 5. Minimal sample viewer (served once SDK files are in place)
+# 5. Minimal sample viewer (classic path-based proxy). demo-app is deployed
+#    separately by the SDK install and reached at /demo-app/.
 cat > /var/www/html/sample.html <<'HTML_EOF'
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
@@ -120,10 +145,11 @@ cat > /var/www/html/sample.html <<'HTML_EOF'
 </html>
 HTML_EOF
 
-# 6. systemd service to auto-start the HVW server on boot
+# 6. systemd service to auto-start the HVW SC server on boot. The server runs
+#    from the SDK tree at /opt/hvw/current so its relative paths stay intact.
 cat > /etc/onboot.sh <<'ONBOOT_EOF'
 #!/bin/bash
-cd /var/www/server/node
+cd /opt/hvw/current/server/node
 ../../3rd_party/node/bin/node --expose-gc ./lib/Startup.js
 ONBOOT_EOF
 chmod 0755 /etc/onboot.sh
@@ -145,4 +171,4 @@ SERVICE_EOF
 systemctl daemon-reload
 systemctl enable onboot.service
 
-echo "HVW bootstrap complete. Transfer the SDK via SCP and start onboot.service."
+echo "HVW bootstrap complete. Install the SDK (auto via HVW_SDK_URL or manual SCP), then start onboot.service."
