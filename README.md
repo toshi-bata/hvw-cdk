@@ -227,6 +227,18 @@ bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'
 - `SshCommand` … SSH 接続コマンド（keyName 指定時）
 - `SampleUrl` … サンプル URL（SDK 設置後にアクセス可能）
 
+> **重要（少し待つ）**：`cdk deploy` 完了直後は、まだ EC2 内部で
+> **SDK のダウンロード・展開・配置（方法 A）や apt のセットアップが進行中**です。
+> `ElasticIP` が表示されても、ビューワにアクセスできるまで**通常 3〜5 分**かかります。
+> 早すぎると `hoops-web-viewer.mjs` が **404** になったり真っ白になります。
+> **数分待ってから**ブラウザを再読込してください。進捗は SSH で
+> `sudo tail -f /var/log/cloud-init-output.log`（`HVW SDK installed ... and server
+> started.` が出れば完了）で確認できます。
+>
+> なお `userDataCausesReplacement: true` のため、user-data / install-sdk を変更して
+> 再デプロイすると**インスタンスが置換され InstanceId が変わります**（bootstrap を
+> 再実行させるための意図的な挙動）。同様に初回起動待ちが発生します。
+
 ## デプロイ後の手順（手動 / 方法 B の場合のみ）
 
 > `HVW_SDK_URL` を指定して自動インストール（方法 A）した場合、この節は不要です。
