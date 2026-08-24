@@ -31,22 +31,79 @@ NGINX のリバースプロキシで WSS→WS を中継することで、Stream 
 - AWS 認証情報（`aws configure` 済みのプロファイル、または環境変数）
 - HOOPS Visualize Web の Linux 版 SDK（`.tar.gz`。ライセンス取得者のみ）
 
+## AWS 認証
+
+CDK 標準の認証がそのまま使えます。IAM ユーザーのアクセスキーなら `aws configure`
+で設定するだけです（CDK 利用者には周知のため詳細は割愛）。
+
+**SSO（IAM Identity Center）の場合**は、以下だけ注意してください。
+
+```bash
+aws configure sso --profile hvw   # プロファイル作成（このマシンで一度だけ）
+aws sso login --profile hvw       # デプロイ前にログイン（トークンは数時間で失効）
+aws sts get-caller-identity --profile hvw   # 疎通確認
+```
+
+> **落とし穴（重要）**：`aws configure sso` で聞かれる **SSO region** は、
+> **IAM Identity Center が設置されたリージョン**であり、HVW をデプロイする
+> リージョン（本手順では `ap-northeast-1`）とは**別物**です。ここを取り違えると
+> `RegisterClient` / `StartDeviceAuthorization` が `InvalidRequestException:
+> invalid_request` で失敗します。設置リージョンが不明なら、AWS access portal に
+> ログインした際のブラウザ（F12 → Network の `portal.sso.<region>.amazonaws.com`）
+> で確認するか、管理者に確認してください。
+
+各コマンドでは `--profile hvw` を付けるか、`$env:AWS_PROFILE = "hvw"`（PowerShell）
+/ `export AWS_PROFILE=hvw`（bash）を設定します。環境変数は**ターミナルを開くたび**に
+再設定が必要（そのウィンドウ内のみ有効）です。`aws configure sso` は再実行不要、
+`aws sso login` はトークン失効時のみ実行します。
+
 ## 設定（context で上書き可能）
 
 | context キー      | 既定値        | 説明 |
 |-------------------|---------------|------|
 | `instanceType`    | `t3.large`    | EC2 インスタンスタイプ |
 | `volumeSize`      | `30`          | ルート EBS サイズ (GiB) |
-| `allowedSshCidr`  | `0.0.0.0/0`   | SSH(22) を許可する CIDR。**自分の IP に絞る事を推奨** |
+| `allowedSshCidr`  | `0.0.0.0/0`   | SSH(22) を許可する CIDR。**自分のグローバル IP に絞る事を推奨**（下記参照） |
 | `keyName`         | （未指定）    | 既存の EC2 キーペア名。未指定なら Session Manager で接続 |
 | `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定なら手動 SCP）。環境変数 `HVW_SDK_URL` でも指定可 |
 
-例:
+### 自分のグローバル IP の調べ方（`allowedSshCidr` 用）
+
+SSH を自分だけに限定するには、自分のグローバル IP を調べて末尾に `/32` を付けます。
+
+```powershell
+(Invoke-RestMethod https://checkip.amazonaws.com).Trim()   # 例: 14.3.142.47
+```
+
+返った値を `-c allowedSshCidr=<返った IP>/32` に使います。`/32` は「その IP 1 つ
+だけ許可」の意味です。`ipconfig` で出る `192.168.x.x` / `10.x.x.x` は LAN 内の
+プライベート IP なので使いません。IP は回線再起動やテザリング切替で変わることが
+あるため、デプロイ直前に確認するのが確実です。
+
+### EC2 キーペアの確認・作成（`keyName` 用）
+
+SSH / SCP でサーバに接続するには、デプロイ先リージョンに存在する EC2 キーペア名を
+`keyName` に指定します。既存のキーペア一覧は次で確認できます。
+
+```powershell
+aws ec2 describe-key-pairs --region ap-northeast-1 --query "KeyPairs[].KeyName" --output table
+```
+
+> **注意**: `keyName` に渡すのは **AWS 上のキーペア「名」だけ**です。`.pem` 拡張子やファイルパスは付けません（例: `toshi-key-pair` ○ / `toshi-key-pair.pem` ✗ / `C:\...\toshi-key-pair.pem` ✗）。`.pem` のフルパスは後述の SSH/SCP の `-i` オプションでのみ使います。
+
+手元に対応する秘密鍵（`.pem`）があるものを選びます。無ければ新規作成して保存します。
+
+```powershell
+aws ec2 create-key-pair --region ap-northeast-1 --key-name my-hvw-key `
+  --query KeyMaterial --output text | Out-File -Encoding ascii $HOME\.ssh\my-hvw-key.pem
+```
+
+例（`<キーペア名>` `<自分のIP>` は自分の値に置換）:
 
 ```bash
 npx cdk deploy \
-  -c keyName=my-keypair \
-  -c allowedSshCidr=203.0.113.10/32 \
+  -c keyName=<キーペア名> \
+  -c allowedSshCidr=<自分のIP>/32 \
   -c instanceType=g4dn.xlarge
 ```
 
@@ -63,25 +120,15 @@ HVW SDK 本体（tar.gz、非公開・ライセンス取得者のみ）の設置
 Developer Zone の署名付き S3 URL などを `HVW_SDK_URL` で渡すと、UserData が
 ダウンロード〜展開〜配置〜`Config.js` 設定〜サーバ起動まで自動で行います。
 
-PowerShell の場合（URL に `&` を含むためシングルクォート必須）:
-
-```powershell
-$env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz?X-Amz-...'
-npx cdk deploy -c keyName=my-keypair -c allowedSshCidr=203.0.113.10/32
-```
-
-bash の場合:
-
-```bash
-export HVW_SDK_URL='https://.../HOOPS_Visualize_Web_..._Linux_x86-64.tar.gz?X-Amz-...'
-npx cdk deploy -c keyName=my-keypair -c allowedSshCidr=203.0.113.10/32
-```
+環境変数 `HVW_SDK_URL`（または context `sdkUrl`）に URL をセットしてから
+デプロイするだけです。**具体的なコマンドは下記「デプロイ手順」に一本化**して
+います。デプロイ完了後、UserData が SDK を取得・設置するため**さらに 2〜5 分**
+待ってから `http://<ElasticIP>/sample.html` を開きます。
 
 > **注意**：署名付き URL は有効期限付き（通常数時間）かつ署名を含むため、
 > **リポジトリにコミットしないでください**。デプロイ時のみ環境変数で渡します。
 > URL は EC2 の UserData に埋め込まれるため、PoC / 検証用途を想定しています。
-> デプロイ後は `http://<ElasticIP>/sample.html` を開くだけで確認できます
-> （下記「デプロイ後の手順」の手動ステップは不要）。
+> この方法 A では「デプロイ後の手順（手動 / 方法 B）」のステップは不要です。
 
 ### 方法 B：手動インストール（`sdkUrl` を渡さない場合）
 
@@ -91,12 +138,31 @@ npx cdk deploy -c keyName=my-keypair -c allowedSshCidr=203.0.113.10/32
 
 ## デプロイ手順
 
-```bash
+クローン直後から通しで実行する例（PowerShell）。方法 A（自動）と方法 B（手動）の
+違いは、手順 4 で `HVW_SDK_URL` をセットするかどうかだけです。
+
+```powershell
+# 1. リポジトリへ移動して依存をインストール（初回のみ）
 cd hvw-cdk
-npm install                 # 初回のみ
-npx cdk bootstrap           # アカウント/リージョン初回のみ
-npx cdk deploy
+npm install
+
+# 2. AWS プロファイル / リージョン（SSO はトークン失効時 aws sso login --profile hvw）
+$env:AWS_PROFILE = "hvw"
+$env:CDK_DEFAULT_REGION = "ap-northeast-1"
+aws sts get-caller-identity   # 疎通確認（アカウント/ロールが返れば OK）
+
+# 3. （初回のみ）CDK bootstrap ※実施済みならスキップ
+#    npx cdk bootstrap aws://<ACCOUNT_ID>/ap-northeast-1
+
+# 4. 【方法 A のみ】SDK の署名付き URL をセット（& を含むためシングルクォート必須）
+#    方法 B（手動 SCP）で進める場合はこの行を実行しない
+$env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz?X-Amz-...'
+
+# 5. デプロイ（keyName / allowedSshCidr は上記「設定」で調べた自分の値に置換）
+npx cdk deploy -c keyName=<キーペア名> -c allowedSshCidr=<自分のIP>/32 --require-approval never
 ```
+
+bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'` に置換。
 
 デプロイ完了後、出力（Outputs）に以下が表示されます。
 
