@@ -103,7 +103,19 @@ export class HvwCdkStack extends cdk.Stack {
         path.join(__dirname, '..', 'assets', 'install-sdk.sh'),
         'utf8',
       );
-      userData.addCommands(`export HVW_SDK_URL='${sdkUrl}'`, installScript);
+
+      // Optional HVW license key. The SDK ships with a time-limited evaluation
+      // license baked into server/node/Config.js; supply a longer-lived key at
+      // deploy time (context `hvwLicense` or env var HVW_LICENSE) to override it.
+      // When omitted, the Config.js default is left untouched.
+      const hvwLicense =
+        (this.node.tryGetContext('hvwLicense') as string) ?? process.env.HVW_LICENSE;
+
+      const exports = [`export HVW_SDK_URL='${sdkUrl}'`];
+      if (hvwLicense) {
+        exports.push(`export HVW_LICENSE='${hvwLicense}'`);
+      }
+      userData.addCommands(...exports, installScript);
     }
 
     // Optional existing EC2 key pair for SSH access.

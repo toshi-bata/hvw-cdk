@@ -122,6 +122,7 @@ aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws ss
 | `allowedSshCidr`  | `0.0.0.0/0`   | SSH(22) を許可する CIDR。**自分のグローバル IP に絞る事を推奨**（下記参照） |
 | `keyName`         | （未指定）    | 既存の EC2 キーペア名。未指定なら Session Manager で接続 |
 | `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定ならインフラのみ構築）。環境変数 `HVW_SDK_URL` でも指定可 |
+| `hvwLicense`      | （未指定）    | HVW ライセンスキー。指定すると SDK の `server/node/Config.js` に埋め込まれた評価ライセンスを上書き（`sdkUrl` による自動インストール時のみ有効）。**未指定なら SDK 同梱の評価ライセンスをそのまま使用**。環境変数 `HVW_LICENSE` でも指定可 |
 
 ### 自分のグローバル IP の調べ方（`allowedSshCidr` 用）
 
@@ -182,6 +183,21 @@ UserData がダウンロード〜展開〜配置〜`Config.js` 設定〜サー�
 > プロキシ / systemd）のみが構築され、SDK は設置されません（`onboot.service` は
 > enable 済みのため、後から手動で SDK を `/opt/hvw` に置いて起動できます）。
 
+### ライセンスキーの上書き（任意）
+
+SDK 同梱の `server/node/Config.js` には**期限付きの評価ライセンス**が埋め込まれ
+ています。デプロイ時に `HVW_LICENSE`（または context `hvwLicense`）を渡すと、
+自動インストール中に `Config.js` の `license: '...'` を指定した値へ置き換えます。
+**未指定の場合は SDK 同梱の評価ライセンスをそのまま使用**します（上書きなし）。
+
+```powershell
+$env:HVW_LICENSE = '<longer-lived-license-key>'
+```
+
+> ライセンスキーも UserData 経由で EC2 に渡るため、**リポジトリにはコミットせず**
+> デプロイ時のみ環境変数で渡してください。`HVW_SDK_URL` 未指定（インフラのみ構築）
+> の場合は `Config.js` が存在しないため `HVW_LICENSE` は無視されます。
+
 ## デプロイ手順
 
 クローン直後から通しで実行する例（PowerShell）です。
@@ -202,11 +218,14 @@ aws sts get-caller-identity   # 疎通確認（アカウント/ロールが返�
 # 4. SDK の署名付き URL をセット（& を含むためシングルクォート必須）
 $env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz?X-Amz-...'
 
+# 4b. ライセンスキーをセット（未指定なら SDK 同梱の評価ライセンスを使用）（任意）
+$env:HVW_LICENSE = '<longer-lived-license-key>'
+
 # 5. デプロイ（keyName / allowedSshCidr は上記「設定」で調べた自分の値に置換）
 npx cdk deploy -c keyName=<キーペア名> -c allowedSshCidr=<自分のIP>/32 --require-approval never
 ```
 
-bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'` に置換。
+bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'`（必要なら `export HVW_LICENSE='...'`）に置換。
 
 デプロイ完了後、出力（Outputs）に以下が表示されます。
 

@@ -22,9 +22,16 @@ WORK=/tmp/hvw-sdk
 mkdir -p "$WORK" /opt/hvw /var/www/html
 
 # Download and extract the SDK archive straight into /opt/hvw, keeping the
-# vendor tree intact so the server keeps its original relative paths.
+# vendor tree intact so the server keeps its original relative paths. The
+# Developer Zone package may actually be a ZIP (despite the .tar.gz name) or a
+# gzip/xz/plain tar, so detect the real format and extract accordingly.
 curl -fSL "$HVW_SDK_URL" -o "$WORK/hvw.tar.gz"
-tar -zxf "$WORK/hvw.tar.gz" -C /opt/hvw
+ARCHIVE_TYPE=$(file -b "$WORK/hvw.tar.gz")
+echo "SDK archive type: $ARCHIVE_TYPE"
+case "$ARCHIVE_TYPE" in
+  *Zip*) unzip -q -o "$WORK/hvw.tar.gz" -d /opt/hvw ;;
+  *)     tar -xf "$WORK/hvw.tar.gz" -C /opt/hvw ;;
+esac
 
 # Resolve the extracted top-level SDK directory (name embeds the version) and
 # point /opt/hvw/current at it so systemd and NGINX use a stable path.
@@ -44,6 +51,21 @@ cp "$SRC/web_viewer/hoops-web-viewer.mjs" \
 perl -0777 -pi -e \
   's/modelDirs:\s*\[.*?\]/modelDirs: [\n        "\/opt\/hvw\/current\/quick_start\/converted_models\/standard\/sc_models",\n    ]/s' \
   "$SRC/server/node/Config.js"
+
+# Override the bundled evaluation license when HVW_LICENSE is supplied at deploy
+# time. The SDK ships a time-limited key in server/node/Config.js; replacing it
+# here lets the deployment use a longer-lived key. When HVW_LICENSE is unset,
+# the Config.js default is left untouched.
+if [ -n "${HVW_LICENSE:-}" ]; then
+  # Replace the license value regardless of whether Config.js quotes it with
+  # single or double quotes (the SDK ships double quotes). The hex classes
+  # \x22 (") and \x27 (') keep this perl program free of literal quotes so it
+  # embeds cleanly inside the shell single-quoted string, and \2 back-references
+  # the opening quote so the same style is preserved on output.
+  perl -0777 -pi -e \
+    'my $lic = $ENV{HVW_LICENSE}; $lic =~ s/\\/\\\\/g; $lic =~ s/([\x22\x27])/\\$1/g; s/(license:\s*)([\x22\x27])(?:\\.|(?!\2).)*?\2/$1$2$lic$2/s' \
+    "$SRC/server/node/Config.js"
+fi
 
 # Start (or restart) the HVW server now that the SDK is in place.
 systemctl restart onboot.service
