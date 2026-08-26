@@ -115,7 +115,13 @@ export class HvwCdkStack extends cdk.Stack {
       if (hvwLicense) {
         exports.push(`export HVW_LICENSE='${hvwLicense}'`);
       }
-      userData.addCommands(...exports, installScript);
+      // user-data.sh runs with `set -x`, and its options carry over because
+      // this install script is appended and executed as one combined bash
+      // script. Disable command tracing before emitting the exports so the
+      // presigned SDK URL and license key are never written to
+      // /var/log/cloud-init-output.log in clear text. install-sdk.sh keeps
+      // `set -eu` (no -x) so the secret-handling commands stay untraced too.
+      userData.addCommands('set +x', ...exports, installScript);
     }
 
     // Optional existing EC2 key pair for SSH access.

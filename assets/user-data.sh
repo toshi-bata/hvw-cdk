@@ -75,15 +75,17 @@ server {
     }
 
     # Classic path-based reverse proxy (forum article style). Used by sample.html
-    # and any client that targets ws(s)://host/wsproxy/<port>.
-    location /wsproxy/ {
-        rewrite /wsproxy/([^/]+) / break;
-        proxy_pass http://127.0.0.1:$1;
+    # and any client that targets ws(s)://host/wsproxy/<port>. The port is
+    # whitelisted (only the HVW 11182 / 11180 ports) so clients cannot use these
+    # routes to relay to arbitrary localhost ports. Anything else falls through
+    # to `location /` and returns 404. proxy_pass carries a variable ($1), so the
+    # forwarded URI is stated explicitly ("/" and "/$2").
+    location ~ ^/wsproxy/(11182|11180)$ {
+        proxy_pass http://127.0.0.1:$1/;
     }
 
-    location /httpproxy/ {
-        rewrite /httpproxy/([^/]+)/([^/]+) /$2 break;
-        proxy_pass http://127.0.0.1:$1;
+    location ~ ^/httpproxy/(11182|11180)/(.*)$ {
+        proxy_pass http://127.0.0.1:$1/$2;
     }
 
     client_max_body_size 200M;
