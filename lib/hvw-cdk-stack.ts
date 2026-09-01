@@ -4,6 +4,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 
 /**
  * Provisions the infrastructure for a HOOPS Visualize Web (HVW) server behind
@@ -122,6 +123,50 @@ export class HvwCdkStack extends cdk.Stack {
       // /var/log/cloud-init-output.log in clear text. install-sdk.sh keeps
       // `set -eu` (no -x) so the secret-handling commands stay untraced too.
       userData.addCommands('set +x', ...exports, installScript);
+    }
+
+    // Optionally deploy a custom web-service redistributable package. When a
+    // local archive path is supplied (context `webappPackage` or env var
+    // WEBAPP_PACKAGE), CDK uploads it as an S3 asset, user-data downloads it and
+    // assets/install-webapp.sh extracts the archive's top-level contents
+    // straight into the NGINX web root (/var/www/html). This is INDEPENDENT of
+    // HVW_SDK_URL, but is appended AFTER the SDK step above so the web-service
+    // package runs last: extraction overwrites existing files, so a bundled
+    // sample.html / demo-app in the archive updates the ones placed earlier.
+    // Building the service or starting it is left to the user (see README and
+    // the user-customization section in install-webapp.sh).
+    const webappPackage =
+      (this.node.tryGetContext('webappPackage') as string) ?? process.env.WEBAPP_PACKAGE;
+    if (webappPackage) {
+      const resolvedPackagePath = path.resolve(process.cwd(), webappPackage);
+      if (!fs.existsSync(resolvedPackagePath)) {
+        throw new Error(
+          `webappPackage / WEBAPP_PACKAGE points at a non-existent path: ${resolvedPackagePath}`,
+        );
+      }
+
+      const webappAsset = new s3assets.Asset(this, 'WebappPackage', {
+        path: resolvedPackagePath,
+      });
+      webappAsset.grantRead(role);
+
+      const webappInstallScript = fs.readFileSync(
+        path.join(__dirname, '..', 'assets', 'install-webapp.sh'),
+        'utf8',
+      );
+
+      // Download the archive to the instance using the EC2 role credentials,
+      // then hand the local path to install-webapp.sh via WEBAPP_ARCHIVE.
+      // (UserData.custom() doesn't support addS3DownloadCommand, so the aws
+      // s3 cp command is emitted explicitly. The EC2 default region from IMDS
+      // matches the asset's bucket region.)
+      const localArchive = '/tmp/webapp-package/archive';
+      userData.addCommands(
+        'mkdir -p /tmp/webapp-package',
+        `aws s3 cp '${webappAsset.s3ObjectUrl}' '${localArchive}'`,
+        `export WEBAPP_ARCHIVE='${localArchive}'`,
+        webappInstallScript,
+      );
     }
 
     // Optional existing EC2 key pair for SSH access.

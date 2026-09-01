@@ -125,6 +125,7 @@ aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws ss
 | `keyName`         | （未指定）    | 既存の EC2 キーペア名。未指定なら Session Manager で接続 |
 | `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定ならインフラのみ構築）。環境変数 `HVW_SDK_URL` でも指定可 |
 | `hvwLicense`      | （未指定）    | HVW ライセンスキー。指定すると SDK の `server/node/Config.js` に埋め込まれた評価ライセンスを上書き（`sdkUrl` による自動インストール時のみ有効）。**未指定なら SDK 同梱の評価ライセンスをそのまま使用**。環境変数 `HVW_LICENSE` でも指定可 |
+| `webappPackage`   | （未指定）    | 独自 Web サービスの再頒布パッケージ（圧縮ファイル）への**ローカルパス**。指定すると CDK が S3 アセットとして自動アップロードし、デプロイ時にサーバへ展開。環境変数 `WEBAPP_PACKAGE` でも指定可。**`sdkUrl` の有無に影響されず独立に動作**（下記「独自 Web サービスの同梱デプロイ」参照） |
 
 ### 自分のグローバル IP の調べ方（`allowedSshCidr` 用）
 
@@ -200,6 +201,38 @@ $env:HVW_LICENSE = '<longer-lived-license-key>'
 > デプロイ時のみ環境変数で渡してください。`HVW_SDK_URL` 未指定（インフラのみ構築）
 > の場合は `Config.js` が存在しないため `HVW_LICENSE` は無視されます。
 
+## 独自 Web サービスの同梱デプロイ
+
+HVW SDK とは別に、**自作の Web サービスの再頒布パッケージ（圧縮ファイル）**を
+デプロイ時にサーバへ同梱・展開できます。ローカルの圧縮ファイルへのパスを
+`WEBAPP_PACKAGE`（または context `webappPackage`）で渡すと、CDK が**S3 アセット
+として自動アップロード**し、EC2 起動時に取得して展開します（SCP 不要）。
+
+- **展開先**：アーカイブの**トップ構成がそのまま `/var/www/html/`（NGINX の
+  HTTP ルート）へ展開**されます。トップは単一フォルダである必要はなく、複数の
+  ファイル・フォルダでも可です。例：アーカイブのトップに `myWebService/` が
+  あれば `/var/www/html/myWebService/...` に配置されます。
+- **`HVW_SDK_URL` と独立**：SDK URL の指定有無に関わらず動作します。
+- **実行順序と上書き**：Web サービスの展開は、`sample.html`（UserData が生成）
+  および `demo-app`（`HVW_SDK_URL` 指定時に配置）の**後**に行われ、**既存ファイルを
+  上書き更新**します。アーカイブのトップに `sample.html` や `demo-app/` を含めると、
+  先に配置されたそれらを差し替えられます。
+- **ビルド・起動はユーザー責務**：既定では**展開のみ**を行います。ビルドや
+  サービス起動が必要な場合は、デプロイ後にユーザーが実施してください。あるいは
+  `assets/install-webapp.sh` は**編集可能なテンプレート**なので、末尾の
+  「User customization」セクションに、展開後のビルドやサービス起動コマンドを
+  追記できます（EC2 ブートストラップ末尾に root で実行されます）。
+
+```powershell
+# 圧縮ファイル（.zip / .tar.gz など）へのローカルパスを指定
+$env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
+```
+
+> **注意**：`WEBAPP_PACKAGE` を変更して再デプロイすると UserData が変化するため、
+> `userDataCausesReplacement: true` によりインスタンスが置換されます（`HVW_SDK_URL`
+> と同様）。取得には EC2 ロールの権限で `aws s3 cp` を使うため、UserData 側で
+> `awscli` を導入しています。
+
 ## デプロイ手順
 
 クローン直後から通しで実行する例（PowerShell）です。
@@ -222,6 +255,9 @@ $env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz
 
 # 4b. ライセンスキーをセット（未指定なら SDK 同梱の評価ライセンスを使用）（任意）
 $env:HVW_LICENSE = '<longer-lived-license-key>'
+
+# 4c. 独自 Web サービスの圧縮ファイルを同梱（任意 / HVW_SDK_URL とは独立）
+$env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
 
 # 5. デプロイ（keyName / allowedSshCidr は上記「設定」で調べた自分の値に置換）
 npx cdk deploy -c keyName=<キーペア名> -c allowedSshCidr=<自分のIP>/32 --require-approval never
@@ -359,6 +395,7 @@ hvw-cdk/
 ├── lib/hvw-cdk-stack.ts      # スタック定義（VPC/SG/EC2/EIP/IAM）
 ├── assets/user-data.sh       # EC2 ブートストラップ（NGINX/certbot/systemd）
 ├── assets/install-sdk.sh     # SDK 自動ダウンロード・設置（sdkUrl 指定時に実行）
+├── assets/install-webapp.sh  # 独自 Web サービス圧縮ファイルの展開（webappPackage 指定時に実行）
 ├── test/hvw-cdk.test.ts      # スタックの簡易テスト
 └── README.md
 ```

@@ -28,7 +28,7 @@ apt-get upgrade -y
 apt-get install -y \
     nginx \
     certbot python3-certbot-nginx \
-    unzip build-essential curl \
+    unzip build-essential curl awscli \
     libglu1-mesa mesa-utils xserver-xorg xinit
 
 # 2. Directories: static web root and the SDK install root

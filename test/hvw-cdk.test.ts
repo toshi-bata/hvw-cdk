@@ -39,3 +39,48 @@ test('user-data reverse proxy whitelists the HVW ports only', () => {
   // ... and the old unrestricted proxy_pass must be gone.
   expect(userData).not.toContain('proxy_pass http://127.0.0.1:$1;');
 });
+
+test('custom web-service package is deployed after sample.html and the SDK, independent of sdkUrl', () => {
+  const app = new cdk.App({
+    context: {
+      webappPackage: 'test/fixtures/webapp',
+      sdkUrl: 'https://example.invalid/HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz',
+    },
+  });
+  const stack = new HvwCdkStack(app, 'TestStack4');
+  const template = Template.fromStack(stack);
+
+  const instances = template.findResources('AWS::EC2::Instance');
+  // With the S3 asset, user-data becomes an Fn::Join of tokens, so stringify
+  // the whole structure and assert on the literal script fragments it contains.
+  const userData = JSON.stringify(Object.values(instances)[0].Properties.UserData);
+
+  const sampleIdx = userData.indexOf('containerId');
+  const sdkIdx = userData.indexOf('HVW SDK installed under');
+  const webappIdx = userData.indexOf('WEBAPP_ARCHIVE is not set');
+
+  // All three steps are present ...
+  expect(sampleIdx).toBeGreaterThanOrEqual(0);
+  expect(sdkIdx).toBeGreaterThanOrEqual(0);
+  expect(webappIdx).toBeGreaterThanOrEqual(0);
+  // ... and the web-service package is extracted LAST (after sample.html and
+  // the SDK/demo-app), so it can overwrite/update those files.
+  expect(webappIdx).toBeGreaterThan(sampleIdx);
+  expect(webappIdx).toBeGreaterThan(sdkIdx);
+});
+
+test('custom web-service package works without an SDK URL (independent of HVW_SDK_URL)', () => {
+  const app = new cdk.App({
+    context: { webappPackage: 'test/fixtures/webapp' },
+  });
+  const stack = new HvwCdkStack(app, 'TestStack5');
+  const template = Template.fromStack(stack);
+
+  const instances = template.findResources('AWS::EC2::Instance');
+  const userData = JSON.stringify(Object.values(instances)[0].Properties.UserData);
+
+  // The web-service extraction step is present even though sdkUrl is unset ...
+  expect(userData).toContain('WEBAPP_ARCHIVE is not set');
+  // ... and the SDK step is absent.
+  expect(userData).not.toContain('HVW SDK installed under');
+});
