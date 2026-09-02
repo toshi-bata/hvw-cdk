@@ -23,13 +23,29 @@ set -eux
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. System packages
+#
+# NOTE: awscli is intentionally NOT installed from apt. Ubuntu 24.04 (noble)
+# dropped the `awscli` package, so `apt-get install awscli` aborts the whole
+# install with "Package 'awscli' has no installation candidate". We install the
+# official AWS CLI v2 below instead (used by the webapp S3 download step).
 apt-get update
 apt-get upgrade -y
 apt-get install -y \
     nginx \
     certbot python3-certbot-nginx \
-    unzip build-essential curl awscli \
+    unzip build-essential curl \
     libglu1-mesa mesa-utils xserver-xorg xinit
+
+# 1b. AWS CLI v2 (official installer). Provides `aws` at /usr/local/bin/aws,
+# used by the webapp download step (`aws s3 cp`) with the instance role creds.
+# Skip if a working `aws` is already present (idempotent re-runs).
+if ! command -v aws >/dev/null 2>&1; then
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+        -o /tmp/awscliv2.zip
+    unzip -q -o /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --update
+    rm -rf /tmp/awscliv2.zip /tmp/aws
+fi
 
 # 2. Directories: static web root and the SDK install root
 mkdir -p /var/www/html /opt/hvw
