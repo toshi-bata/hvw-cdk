@@ -125,19 +125,60 @@ export class HvwCdkStack extends cdk.Stack {
       userData.addCommands('set +x', ...exports, installScript);
     }
 
-    // Optionally deploy a custom web-service redistributable package. When a
-    // local archive path is supplied (context `webappPackage` or env var
-    // WEBAPP_PACKAGE), CDK uploads it as an S3 asset, user-data downloads it and
-    // assets/install-webapp.sh extracts the archive's top-level contents
-    // straight into the NGINX web root (/var/www/html). This is INDEPENDENT of
-    // HVW_SDK_URL, but is appended AFTER the SDK step above so the web-service
-    // package runs last: extraction overwrites existing files, so a bundled
-    // sample.html / demo-app in the archive updates the ones placed earlier.
-    // Building the service or starting it is left to the user (see README and
-    // the user-customization section in install-webapp.sh).
+    // Optionally deploy a custom web-service redistributable package. There are
+    // two mutually exclusive ways to supply it (checked in priority order):
+    //
+    //   1. webappS3Uri / WEBAPP_S3_URI — an `s3://bucket/key` URI of an archive
+    //      you have ALREADY uploaded to your own S3 bucket. CDK does NOT stage or
+    //      hash the file; it only grants the instance role s3:GetObject on that
+    //      object and user-data downloads it with `aws s3 cp`. This is the right
+    //      choice for large archives (multi-GB): CDK assets are read whole via
+    //      fs.readFileSync during synth validation, which Node cannot do for
+    //      files larger than 2 GiB (ERR_FS_FILE_TOO_LARGE).
+    //
+    //   2. webappPackage / WEBAPP_PACKAGE — a LOCAL archive path. CDK uploads it
+    //      as an S3 asset (convenient, no pre-upload). Only for smaller archives:
+    //      a hard size guard below rejects files that would trip the 2 GiB synth
+    //      limit and points you at webappS3Uri instead.
+    //
+    // Both feed the same downstream flow: download the archive to the instance
+    // and hand its local path to assets/install-webapp.sh via WEBAPP_ARCHIVE.
+    // This is INDEPENDENT of HVW_SDK_URL, but appended AFTER the SDK step so the
+    // web-service package runs last (extraction overwrites files placed earlier).
+    const webappS3Uri =
+      (this.node.tryGetContext('webappS3Uri') as string) ?? process.env.WEBAPP_S3_URI;
     const webappPackage =
       (this.node.tryGetContext('webappPackage') as string) ?? process.env.WEBAPP_PACKAGE;
-    if (webappPackage) {
+
+    if (webappS3Uri && webappPackage) {
+      throw new Error(
+        'Supply either webappS3Uri (s3://bucket/key of a pre-uploaded archive) or ' +
+          'webappPackage (local archive path), not both.',
+      );
+    }
+
+    // Resolve the archive to an S3 location the instance downloads from. For a
+    // local package this is the uploaded CDK asset; for an S3 URI it is the
+    // object you pre-uploaded (and the role is granted read access to it).
+    let webappS3ObjectUrl: string | undefined;
+
+    if (webappS3Uri) {
+      const match = /^s3:\/\/([^/]+)\/(.+)$/.exec(webappS3Uri);
+      if (!match) {
+        throw new Error(
+          `webappS3Uri / WEBAPP_S3_URI must be an s3://bucket/key URI, got: ${webappS3Uri}`,
+        );
+      }
+      const [, bucketName, objectKey] = match;
+      // Least privilege: read access to exactly this object, nothing else.
+      role.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['s3:GetObject'],
+          resources: [`arn:${this.partition}:s3:::${bucketName}/${objectKey}`],
+        }),
+      );
+      webappS3ObjectUrl = webappS3Uri;
+    } else if (webappPackage) {
       const resolvedPackagePath = path.resolve(process.cwd(), webappPackage);
       if (!fs.existsSync(resolvedPackagePath)) {
         throw new Error(
@@ -145,11 +186,29 @@ export class HvwCdkStack extends cdk.Stack {
         );
       }
 
+      // Guard against the 2 GiB CDK-asset limit. During synth CDK's validation
+      // reads each staged asset whole with fs.readFileSync, which throws
+      // ERR_FS_FILE_TOO_LARGE for files larger than 2 GiB. Reject early with an
+      // actionable message pointing at the S3-URI path for large archives.
+      const maxAssetBytes = 1.9 * 1024 * 1024 * 1024;
+      const packageBytes = fs.statSync(resolvedPackagePath).size;
+      if (packageBytes > maxAssetBytes) {
+        throw new Error(
+          `webappPackage is ${(packageBytes / 1024 ** 3).toFixed(2)} GiB, which is too ` +
+            'large to bundle as a CDK asset (Node cannot fs.readFileSync files larger ' +
+            'than 2 GiB during synth). Upload the archive to your own S3 bucket and ' +
+            'pass webappS3Uri=s3://bucket/key instead.',
+        );
+      }
+
       const webappAsset = new s3assets.Asset(this, 'WebappPackage', {
         path: resolvedPackagePath,
       });
       webappAsset.grantRead(role);
+      webappS3ObjectUrl = webappAsset.s3ObjectUrl;
+    }
 
+    if (webappS3ObjectUrl) {
       const webappInstallScript = fs.readFileSync(
         path.join(__dirname, '..', 'assets', 'install-webapp.sh'),
         'utf8',
@@ -159,11 +218,11 @@ export class HvwCdkStack extends cdk.Stack {
       // then hand the local path to install-webapp.sh via WEBAPP_ARCHIVE.
       // (UserData.custom() doesn't support addS3DownloadCommand, so the aws
       // s3 cp command is emitted explicitly. The EC2 default region from IMDS
-      // matches the asset's bucket region.)
+      // matches the asset's / object's bucket region.)
       const localArchive = '/tmp/webapp-package/archive';
       userData.addCommands(
         'mkdir -p /tmp/webapp-package',
-        `aws s3 cp '${webappAsset.s3ObjectUrl}' '${localArchive}'`,
+        `aws s3 cp '${webappS3ObjectUrl}' '${localArchive}'`,
         `export WEBAPP_ARCHIVE='${localArchive}'`,
         webappInstallScript,
       );

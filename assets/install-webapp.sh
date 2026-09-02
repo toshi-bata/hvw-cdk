@@ -3,9 +3,11 @@
 # Deploy a custom web-service redistributable package into the NGINX web root.
 #
 # This script is appended to the EC2 user-data only when a package is supplied
-# at deploy time (context `webappPackage` or env var WEBAPP_PACKAGE). CDK uploads
-# the local archive as an S3 asset, user-data downloads it, and this script
-# extracts it. WEBAPP_ARCHIVE points at the downloaded archive on the instance.
+# at deploy time. The archive reaches the instance one of two ways (see README /
+# lib/hvw-cdk-stack.ts): a LOCAL path (`webappPackage`) that CDK uploads as an S3
+# asset, or a pre-uploaded S3 object (`webappS3Uri`) referenced directly. Either
+# way user-data downloads it and this script extracts it. WEBAPP_ARCHIVE points
+# at the downloaded archive on the instance.
 #
 # Placement / ordering (see README):
 #   * The archive's TOP-LEVEL contents are extracted straight into

@@ -125,7 +125,8 @@ aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws ss
 | `keyName`         | （未指定）    | 既存の EC2 キーペア名。未指定なら Session Manager で接続 |
 | `sdkUrl`          | （未指定）    | HVW SDK の tar.gz ダウンロード URL。指定すると SDK を**自動インストール**（未指定ならインフラのみ構築）。環境変数 `HVW_SDK_URL` でも指定可 |
 | `hvwLicense`      | （未指定）    | HVW ライセンスキー。指定すると SDK の `server/node/Config.js` に埋め込まれた評価ライセンスを上書き（`sdkUrl` による自動インストール時のみ有効）。**未指定なら SDK 同梱の評価ライセンスをそのまま使用**。環境変数 `HVW_LICENSE` でも指定可 |
-| `webappPackage`   | （未指定）    | 独自 Web サービスの再頒布パッケージ（圧縮ファイル）への**ローカルパス**。指定すると CDK が S3 アセットとして自動アップロードし、デプロイ時にサーバへ展開。環境変数 `WEBAPP_PACKAGE` でも指定可。**`sdkUrl` の有無に影響されず独立に動作**（下記「独自 Web サービスの同梱デプロイ」参照） |
+| `webappPackage`   | （未指定）    | 独自 Web サービスの再頒布パッケージ（圧縮ファイル）への**ローカルパス**。指定すると CDK が S3 アセットとして自動アップロードし、デプロイ時にサーバへ展開。環境変数 `WEBAPP_PACKAGE` でも指定可。**約 1.9 GiB を超えるファイルは指定不可**（CDK アセットは synth 時に丸ごと読み込むため 2 GiB 制約に抵触。大容量は `webappS3Uri` を使用）。**`sdkUrl` の有無に影響されず独立に動作**（下記「独自 Web サービスの同梱デプロイ」参照） |
+| `webappS3Uri`     | （未指定）    | 事前に自分の S3 バケットへアップロード済みの再頒布パッケージの `s3://bucket/key` URI。CDK はアセット化せず、EC2 ロールに当該オブジェクトの `s3:GetObject` のみ付与して `aws s3 cp` で取得。**大容量（数 GB）向けの推奨方式**（2 GiB 制約・毎 synth の巨大コピーを回避）。環境変数 `WEBAPP_S3_URI` でも指定可。`webappPackage` とは**排他**（両方指定はエラー） |
 
 ### 自分のグローバル IP の調べ方（`allowedSshCidr` 用）
 
@@ -204,9 +205,23 @@ $env:HVW_LICENSE = '<longer-lived-license-key>'
 ## 独自 Web サービスの同梱デプロイ
 
 HVW SDK とは別に、**自作の Web サービスの再頒布パッケージ（圧縮ファイル）**を
-デプロイ時にサーバへ同梱・展開できます。ローカルの圧縮ファイルへのパスを
-`WEBAPP_PACKAGE`（または context `webappPackage`）で渡すと、CDK が**S3 アセット
-として自動アップロード**し、EC2 起動時に取得して展開します（SCP 不要）。
+デプロイ時にサーバへ同梱・展開できます。渡し方は**排他の 2 通り**です。
+
+1. **`WEBAPP_S3_URI`（context `webappS3Uri`）＝ 事前アップロード済み S3 参照（大容量の推奨方式）**
+   自分の S3 バケットへ先にアップロードし、`s3://bucket/key` URI を渡します。
+   CDK はファイルをアセット化・ハッシュ化せず、EC2 ロールに**当該オブジェクトの
+   `s3:GetObject` のみ**を付与し、EC2 起動時に `aws s3 cp` で取得します。**数 GB 級の
+   アーカイブはこちらを使用**してください（下記の 2 GiB 制約と、synth ごとの巨大な
+   `cdk.out` コピーを回避できます）。
+
+2. **`WEBAPP_PACKAGE`（context `webappPackage`）＝ ローカルパス（手軽・小容量向け）**
+   ローカルの圧縮ファイルへのパスを渡すと、CDK が**S3 アセットとして自動アップロード**
+   し、EC2 起動時に取得して展開します（SCP 不要）。**約 1.9 GiB を超えるファイルは
+   エラー**になります。CDK は synth 時の検証でアセットを丸ごと `fs.readFileSync` する
+   ため、Node.js の 2 GiB（`ERR_FS_FILE_TOO_LARGE`）制約に抵触するためです。大容量は
+   上記 `webappS3Uri` を使ってください。
+
+どちらの方式でも、以降の展開処理（`assets/install-webapp.sh`）は共通です。
 
 - **展開先**：アーカイブの**トップ構成がそのまま `/var/www/html/`（NGINX の
   HTTP ルート）へ展開**されます。トップは単一フォルダである必要はなく、複数の
@@ -224,14 +239,19 @@ HVW SDK とは別に、**自作の Web サービスの再頒布パッケージ�
   追記できます（EC2 ブートストラップ末尾に root で実行されます）。
 
 ```powershell
-# 圧縮ファイル（.zip / .tar.gz など）へのローカルパスを指定
+# 方式 1: 大容量向け。事前に自分の S3 バケットへアップロードしてから URI を渡す
+aws s3 cp 'C:\path\to\my-web-service.zip' s3://my-bucket/webapp/my-web-service.zip
+$env:WEBAPP_S3_URI = 's3://my-bucket/webapp/my-web-service.zip'
+
+# 方式 2: 小容量向け。ローカルパスを直接指定（約 1.9 GiB 以下）
 $env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
 ```
 
-> **注意**：`WEBAPP_PACKAGE` を変更して再デプロイすると UserData が変化するため、
-> `userDataCausesReplacement: true` によりインスタンスが置換されます（`HVW_SDK_URL`
-> と同様）。取得には EC2 ロールの権限で `aws s3 cp` を使うため、UserData 側で
-> `awscli` を導入しています。
+> **注意**：`WEBAPP_PACKAGE` / `WEBAPP_S3_URI` を変更して再デプロイすると UserData が
+> 変化するため、`userDataCausesReplacement: true` によりインスタンスが置換されます
+> （`HVW_SDK_URL` と同様）。取得には EC2 ロールの権限で `aws s3 cp` を使うため、
+> UserData 側で `awscli` を導入しています。`webappS3Uri` を使う場合、ロールには
+> 指定したオブジェクトの `s3:GetObject` のみが付与されます（最小権限）。
 
 ## デプロイ手順
 
@@ -257,7 +277,9 @@ $env:HVW_SDK_URL = 'https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz
 $env:HVW_LICENSE = '<longer-lived-license-key>'
 
 # 4c. 独自 Web サービスの圧縮ファイルを同梱（任意 / HVW_SDK_URL とは独立）
+#     小容量: ローカルパス / 大容量(数GB): 事前アップロード済み S3 URI（排他）
 $env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
+# $env:WEBAPP_S3_URI = 's3://my-bucket/webapp/my-web-service.zip'
 
 # 5. デプロイ（keyName / allowedSshCidr は上記「設定」で調べた自分の値に置換）
 npx cdk deploy -c keyName=<キーペア名> -c allowedSshCidr=<自分のIP>/32 --require-approval never
