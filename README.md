@@ -313,10 +313,19 @@ export WEBAPP_PACKAGE='/path/to/my-web-service.zip'
 - **systemd サービス** `pyapp.service` を作成・起動。**ヘッドレス表示**
   （`DISPLAY=:99`、UserData が起動する `xvfb.service`）を `Requires` し、
   非 root（`ubuntu`）で `PYAPP_PORT`（既定 8000）を待受。
-- **リバースプロキシ公開**：`/etc/nginx/pyapp-locations/hoops-ai.conf` を配置し、
-  既存の NGINX フロント（80/443）の `/app/` を `127.0.0.1:PYAPP_PORT` へ転送。
-  **ポートをインターネットへ開けずに公開**できます（SC サーバーのポート
-  ホワイトリスト 11182/11180 は緩めません）。
+- **リバースプロキシ公開（サイトのルート `/`）**：`/etc/nginx/pyapp-locations/root.conf`
+  を配置し、UserData のサーバーブロックの変数 `$pyapp_root` / `$ws_upstream` を
+  アプリ側へ再ポイント。これにより **`/`・`/static`・API ルート・WebSocket まで
+  すべて `127.0.0.1:PYAPP_PORT` へ転送**され、**ポートを開けずに 80/443 で公開**
+  できます（SC サーバーのポートホワイトリスト 11182/11180 は緩めません）。
+  **アプリ側の改修は不要**（アプリは通常どおりルート絶対 URL を出すだけ）。
+
+> **前提：この箱ではアプリがルートを占有**。HOOPS AI は `/static/…` などルート絶対
+> パスを出すため、サブパス（例 `/app/`）ではなく**ルート `/` で公開**します。よって
+> **HVW 静的サイトは同居させない**（`sdkUrl` / `webappPackage` を渡さずにデプロイ）
+> のが前提です。どうしてもサブパスで同居させたい場合は、アプリ側が base path 付き
+> URL（FastAPI `root_path` ＋ バンドラの `base` など）を出せる必要があり、それは
+> アプリ側の対応事項です。
 
 > **ヘッドレス対応**：本 CDK が作る EC2 は headless 前提で構成済みです。UserData が
 > OpenGL/OSMesa ランタイムと `Xvfb`（`xvfb.service`, `DISPLAY=:99`）を導入・常駐
@@ -324,9 +333,13 @@ export WEBAPP_PACKAGE='/path/to/my-web-service.zip'
 > -11）することはありません。GPU（SSR）は別途 NVIDIA ドライバ導入が必要です。
 
 > **`appPort` について**：`-c appPort=8000` を渡すと、リバースプロキシに加えて
-> ポート 8000 を**`allowedSshCidr` と同じ CIDR にのみ**直接開放します（動作確認用）。
-> 本命はリバースプロキシ経由の公開なので、直接ポートを開けない運用も可能です
-> （その場合 `PYAPP_PORT` は既定の 8000 を使用）。
+> ポート 8000 を**`allowedSshCidr` と同じ CIDR にのみ**直接開放します（動作確認用の
+> `http://<IP>:8000/`）。**本命はリバースプロキシ経由の公開**（`http://<IP>/` ＝
+> 80/443）なので、`appPort` を指定せず直接ポートを開けない運用が推奨です。
+
+> **アクセス**：デプロイ後、`http://<EIP>/`（certbot 後は `https://<ドメイン>/`）で
+> アプリが開きます。アプリがルートを占有するので、パスはアプリの出す URL のまま
+> （サブパス化は不要）。
 
 > **モデル/重み・アプリ内部**：大容量 ML モデル（`*.ckpt` 等）の配置やアプリ固有の
 > 起動オプションは**インフラ側の責務ではありません**。HOOPS AI WebAPI 側の README に
@@ -338,14 +351,18 @@ export WEBAPP_PACKAGE='/path/to/my-web-service.zip'
 # --- PowerShell (Windows) ---
 $env:PYAPP_S3_URI = 's3://my-bucket/pyapp/hoops_ai.zip'   # 大容量向け（推奨）
 # $env:PYAPP_PACKAGE = 'C:\path\to\hoops_ai.zip'          # 小容量向け
-# npx cdk deploy -c appPort=8000 -c allowedSshCidr=<自分のIP>/32 ...
+# sdkUrl / webappPackage は渡さない（アプリがルートを占有するため）
+# npx cdk deploy -c allowedSshCidr=<自分のIP>/32 -c keyName=<key> --require-approval never
+# 直接 8000 でも確認したいときだけ: -c appPort=8000 を追加
 ```
 
 ```bash
 # --- bash (Linux/macOS) ---
 export PYAPP_S3_URI='s3://my-bucket/pyapp/hoops_ai.zip'   # 大容量向け（推奨）
 # export PYAPP_PACKAGE='/path/to/hoops_ai.zip'            # 小容量向け
-# npx cdk deploy -c appPort=8000 -c allowedSshCidr=<自分のIP>/32 ...
+# sdkUrl / webappPackage は渡さない（アプリがルートを占有するため）
+# npx cdk deploy -c allowedSshCidr=<自分のIP>/32 -c keyName=<key> --require-approval never
+# 直接 8000 でも確認したいときだけ: -c appPort=8000 を追加
 ```
 
 ## デプロイ手順

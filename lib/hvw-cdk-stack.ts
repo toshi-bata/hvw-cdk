@@ -43,8 +43,8 @@ export class HvwCdkStack extends cdk.Stack {
     // WebAPI on 8000). When set, the security group opens it - but only to the
     // same CIDR as SSH (allowedSshCidr), never 0.0.0.0/0, because such an app may
     // serve confidential CAD/model data. The preferred public path is still the
-    // NGINX reverse proxy on 80/443 (the app's install script adds its own proxy
-    // location); appPort is mainly for direct, IP-restricted testing.
+    // NGINX reverse proxy on 80/443 (install-pyapp.sh makes the app own the site
+    // root there); appPort is mainly for direct, IP-restricted testing.
     const appPortCtx = this.node.tryGetContext('appPort') ?? process.env.APP_PORT;
     const appPort = appPortCtx !== undefined ? Number(appPortCtx) : undefined;
 

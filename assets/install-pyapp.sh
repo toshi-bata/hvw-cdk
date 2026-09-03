@@ -21,9 +21,12 @@
 #   3. Builds a venv and installs the app's web-stack requirements.
 #   4. Installs & starts a systemd service that runs the app against the
 #      shared headless display (DISPLAY=:99 from xvfb.service in user-data.sh).
-#   5. Publishes the app through the existing NGINX front end (80/443) by
-#      dropping a reverse-proxy `location` snippet into /etc/nginx/pyapp-locations/,
-#      so you do NOT have to open PYAPP_PORT to the internet.
+#   5. Publishes the app on the site ROOT through the existing NGINX front end
+#      (80/443) by re-pointing the server block's $pyapp_root / $ws_upstream
+#      variables at the app, so /, /static, API routes and WebSocket upgrades
+#      all reach it - with NO app-side changes. Assumes the app owns the root
+#      (deploy this box without the HVW static site: no sdkUrl / webappPackage).
+#      You do NOT have to open PYAPP_PORT to the internet.
 #
 # NOTE (model / weights): fetching large ML models (e.g. a *.ckpt) is the app's
 # concern, not this infra script. Place them per the app's own README (see the
@@ -42,7 +45,6 @@ APP_DIR=/opt/hoops-ai              # extraction target (outside the web root)
 APP_USER=ubuntu                    # runs the service as this non-root user
 VENV_DIR="$APP_DIR/.webvenv"       # web-stack venv (HOOPS AI adds its own venv)
 SERVICE_NAME=pyapp                 # systemd unit name -> pyapp.service
-PROXY_PREFIX=/app/                 # NGINX location prefix proxied to the app
 
 # 1. Python toolchain. Ubuntu 24.04 ships Python 3.12 but not pip/venv, and the
 #    redistributable may be a .zip or .7z, so make both extractors available.
@@ -135,25 +137,26 @@ SERVICE_EOF
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"
 
-# 5. Expose the app through the existing NGINX front end (port 80/443) instead
-#    of opening PYAPP_PORT publicly. user-data.sh's server block does
-#    `include /etc/nginx/pyapp-locations/*.conf;`, so this snippet is picked up
-#    on reload. Adjust PROXY_PREFIX / add more locations for your app's routes.
+# 5. Publish the app on the site ROOT through the existing NGINX front end
+#    (80/443) instead of opening PYAPP_PORT publicly. user-data.sh's server
+#    block defines $pyapp_root / $ws_upstream (default: static site + SC server)
+#    and includes /etc/nginx/pyapp-locations/*.conf. By re-pointing those
+#    variables here, "/", "/static", the app's API routes AND WebSocket upgrades
+#    all reach the app - with NO app-side changes (the app keeps emitting its
+#    normal root-absolute URLs). This assumes the app owns the root: deploy this
+#    box WITHOUT the HVW static site (no sdkUrl / webappPackage). If you instead
+#    need to co-host under a sub-path (e.g. /app/), the app must emit base-path
+#    aware URLs (FastAPI root_path + your bundler's base) - see the app README.
 mkdir -p /etc/nginx/pyapp-locations
-cat > /etc/nginx/pyapp-locations/hoops-ai.conf <<NGINX_EOF
-location ${PROXY_PREFIX} {
-    proxy_pass http://127.0.0.1:${PYAPP_PORT};
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade    \$http_upgrade;
-    proxy_set_header Connection \$hvw_connection;
-    proxy_set_header Host       \$host;
-    proxy_set_header X-Real-IP  \$remote_addr;
-    proxy_read_timeout          86400s;
-}
+cat > /etc/nginx/pyapp-locations/root.conf <<NGINX_EOF
+# ${SERVICE_NAME} owns the site root. Overrides the defaults in the server block
+# so every unmatched request (and WebSocket upgrades on "/") reaches the app.
+set \$pyapp_root  "http://127.0.0.1:${PYAPP_PORT}";
+set \$ws_upstream "http://127.0.0.1:${PYAPP_PORT}";
 NGINX_EOF
 
 nginx -t
 systemctl reload nginx
 
 echo "Python app deployed to $APP_DIR, service ${SERVICE_NAME} on port ${PYAPP_PORT}."
-echo "Reachable via the NGINX front end at ${PROXY_PREFIX} (and directly on ${PYAPP_PORT} if appPort was set)."
+echo "Reachable via the NGINX front end at http://<host>/ (and directly on ${PYAPP_PORT} if appPort was set)."

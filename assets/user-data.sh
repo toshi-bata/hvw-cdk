@@ -114,22 +114,48 @@ server {
     proxy_set_header Host       $host;
     proxy_read_timeout          86400s;
 
+    # Defaults for the "who owns the site root" decision. On a plain HVW box
+    # these stay as-is: WebSocket upgrades stream to the private SC server and
+    # everything else is served as a static file. A Python app that owns the
+    # root (install-pyapp.sh) overrides both via the include below.
+    #   $ws_upstream : where a WebSocket upgrade on "/" is proxied.
+    #   $pyapp_root  : root application upstream; empty = no root app.
+    set $ws_upstream "http://127.0.0.1:11182";
+    set $pyapp_root  "";
+
+    # App-owned overrides. install-pyapp.sh drops a snippet into
+    # /etc/nginx/pyapp-locations/ that re-points $pyapp_root (and $ws_upstream)
+    # at the app, so /, /static, API routes and WebSockets all reach it - the
+    # app is published on 80/443 without opening its port or loosening the
+    # SC-server whitelist below. Wildcard include is optional (zero-match safe).
+    include /etc/nginx/pyapp-locations/*.conf;
+
     # Modern, client-agnostic routing: a WebSocket upgrade on the standard port
-    # goes to the private SC server; any other request is served statically.
-    # Works with the current demo-app (ws://host:<80|443>/?renderingLocation=..).
+    # goes to $ws_upstream (SC server by default); any other request is served
+    # statically, then falls through to the root app (if any) via @pyapp.
     location / {
         if ($http_upgrade = websocket) {
-            proxy_pass http://127.0.0.1:11182;
+            proxy_pass $ws_upstream;
         }
-        try_files $uri $uri/ =404;
+        try_files $uri $uri/ @pyapp;
+    }
+
+    # Fallback: anything not matched above goes to the root application when one
+    # is installed ($pyapp_root set); otherwise 404. `return` is one of the few
+    # directives that is safe inside `if` in a location context.
+    location @pyapp {
+        if ($pyapp_root = "") {
+            return 404;
+        }
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass $pyapp_root;
     }
 
     # Classic path-based reverse proxy (forum article style). Used by sample.html
     # and any client that targets ws(s)://host/wsproxy/<port>. The port is
     # whitelisted (only the HVW 11182 / 11180 ports) so clients cannot use these
-    # routes to relay to arbitrary localhost ports. Anything else falls through
-    # to `location /` and returns 404. proxy_pass carries a variable ($1), so the
-    # forwarded URI is stated explicitly ("/" and "/$2").
+    # routes to relay to arbitrary localhost ports. proxy_pass carries a variable
+    # ($1), so the forwarded URI is stated explicitly ("/" and "/$2").
     location ~ ^/wsproxy/(11182|11180)$ {
         proxy_pass http://127.0.0.1:$1/;
     }
@@ -137,13 +163,6 @@ server {
     location ~ ^/httpproxy/(11182|11180)/(.*)$ {
         proxy_pass http://127.0.0.1:$1/$2;
     }
-
-    # App-owned reverse-proxy locations. A Python/app install script (e.g.
-    # assets/install-pyapp.sh) drops its own `location` snippet(s) into
-    # /etc/nginx/pyapp-locations/ to expose the app through this front end on
-    # 80/443 - without loosening the SC-server whitelist above. The wildcard
-    # include is optional: with no snippet present it simply matches nothing.
-    include /etc/nginx/pyapp-locations/*.conf;
 
     client_max_body_size 200M;
 }
