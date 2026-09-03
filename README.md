@@ -111,7 +111,14 @@ aws sts get-caller-identity --profile hvw   # 疎通確認
 新しいターミナルでの定番手順（このウィンドウのみ有効）:
 
 ```powershell
+# PowerShell (Windows)
 $env:AWS_PROFILE = "hvw"
+aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws sso login --profile hvw
+```
+
+```bash
+# bash (Linux/macOS)
+export AWS_PROFILE=hvw
 aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws sso login --profile hvw
 ```
 
@@ -133,7 +140,13 @@ aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws ss
 SSH を自分だけに限定するには、自分のグローバル IP を調べて末尾に `/32` を付けます。
 
 ```powershell
+# PowerShell (Windows)
 (Invoke-RestMethod https://checkip.amazonaws.com).Trim()   # 例: 14.3.142.47
+```
+
+```bash
+# bash (Linux/macOS)
+curl -s https://checkip.amazonaws.com   # 例: 14.3.142.47
 ```
 
 返った値を `-c allowedSshCidr=<返った IP>/32` に使います。`/32` は「その IP 1 つ
@@ -157,6 +170,12 @@ aws ec2 describe-key-pairs --region ap-northeast-1 --query "KeyPairs[].KeyName" 
 ```powershell
 aws ec2 create-key-pair --region ap-northeast-1 --key-name my-hvw-key `
   --query KeyMaterial --output text | Out-File -Encoding ascii $HOME\.ssh\my-hvw-key.pem
+```
+
+```bash
+aws ec2 create-key-pair --region ap-northeast-1 --key-name my-hvw-key \
+  --query KeyMaterial --output text > ~/.ssh/my-hvw-key.pem
+chmod 400 ~/.ssh/my-hvw-key.pem
 ```
 
 例（`<キーペア名>` `<自分のIP>` は自分の値に置換）:
@@ -195,7 +214,13 @@ SDK 同梱の `server/node/Config.js` には**期限付きの評価ライセン�
 **未指定の場合は SDK 同梱の評価ライセンスをそのまま使用**します（上書きなし）。
 
 ```powershell
+# PowerShell (Windows)
 $env:HVW_LICENSE = '<longer-lived-license-key>'
+```
+
+```bash
+# bash (Linux/macOS)
+export HVW_LICENSE='<longer-lived-license-key>'
 ```
 
 > ライセンスキーも UserData 経由で EC2 に渡るため、**リポジトリにはコミットせず**
@@ -239,12 +264,23 @@ HVW SDK とは別に、**自作の Web サービスの再頒布パッケージ�
   追記できます（EC2 ブートストラップ末尾に root で実行されます）。
 
 ```powershell
+# --- PowerShell (Windows) ---
 # 方式 1: 大容量向け。事前に自分の S3 バケットへアップロードしてから URI を渡す
 aws s3 cp 'C:\path\to\my-web-service.zip' s3://my-bucket/webapp/my-web-service.zip
 $env:WEBAPP_S3_URI = 's3://my-bucket/webapp/my-web-service.zip'
 
 # 方式 2: 小容量向け。ローカルパスを直接指定（約 1.9 GiB 以下）
 $env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
+```
+
+```bash
+# --- bash (Linux/macOS) ---
+# 方式 1: 大容量向け。事前に自分の S3 バケットへアップロードしてから URI を渡す
+aws s3 cp '/path/to/my-web-service.zip' s3://my-bucket/webapp/my-web-service.zip
+export WEBAPP_S3_URI='s3://my-bucket/webapp/my-web-service.zip'
+
+# 方式 2: 小容量向け。ローカルパスを直接指定（約 1.9 GiB 以下）
+export WEBAPP_PACKAGE='/path/to/my-web-service.zip'
 ```
 
 > **注意**：`WEBAPP_PACKAGE` / `WEBAPP_S3_URI` を変更して再デプロイすると UserData が
@@ -255,7 +291,7 @@ $env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
 
 ## デプロイ手順
 
-クローン直後から通しで実行する例（PowerShell）です。
+クローン直後から通しで実行する例です（PowerShell 版と bash 版を併記）。
 
 ```powershell
 # 1. リポジトリへ移動して依存をインストール（初回のみ）
@@ -285,7 +321,35 @@ $env:WEBAPP_PACKAGE = 'C:\path\to\my-web-service.zip'
 npx cdk deploy -c keyName=<キーペア名> -c allowedSshCidr=<自分のIP>/32 --require-approval never
 ```
 
-bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'`（必要なら `export HVW_LICENSE='...'`）に置換。
+bash の場合は 2〜4 を `export AWS_PROFILE=hvw` / `export HVW_SDK_URL='...'`（必要なら `export HVW_LICENSE='...'`）に置換します。以下は Linux/macOS（bash/zsh）向けの通し例です。
+
+```bash
+# 1. リポジトリへ移動して依存をインストール（初回のみ）
+cd hvw-cdk
+npm install
+
+# 2. AWS プロファイル / リージョン（SSO はトークン失効時 aws sso login --profile hvw）
+export AWS_PROFILE=hvw
+export CDK_DEFAULT_REGION=ap-northeast-1
+aws sts get-caller-identity   # 疎通確認（アカウント/ロールが返れば OK）
+
+# 3. （初回のみ）CDK bootstrap ※実施済みならスキップ
+#    npx cdk bootstrap aws://<ACCOUNT_ID>/ap-northeast-1
+
+# 4. SDK の署名付き URL をセット（& を含むためシングルクォート必須）
+export HVW_SDK_URL='https://.../HOOPS_Visualize_Web_2026.6.0_Linux_x86-64.tar.gz?X-Amz-...'
+
+# 4b. ライセンスキーをセット（未指定なら SDK 同梱の評価ライセンスを使用）（任意）
+export HVW_LICENSE='<longer-lived-license-key>'
+
+# 4c. 独自 Web サービスの圧縮ファイルを同梱（任意 / HVW_SDK_URL とは独立）
+#     小容量: ローカルパス / 大容量(数GB): 事前アップロード済み S3 URI（排他）
+export WEBAPP_PACKAGE='/path/to/my-web-service.zip'
+# export WEBAPP_S3_URI='s3://my-bucket/webapp/my-web-service.zip'
+
+# 5. デプロイ（keyName / allowedSshCidr は上記「設定」で調べた自分の値に置換）
+npx cdk deploy -c keyName=<キーペア名> -c allowedSshCidr=<自分のIP>/32 --require-approval never
+```
 
 デプロイ完了後、出力（Outputs）に以下が表示されます。
 
