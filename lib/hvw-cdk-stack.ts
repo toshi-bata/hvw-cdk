@@ -39,6 +39,15 @@ export class HvwCdkStack extends cdk.Stack {
     const sshCidr = (this.node.tryGetContext('allowedSshCidr') as string) ?? '0.0.0.0/0';
     const keyName = this.node.tryGetContext('keyName') as string | undefined;
 
+    // Optional TCP port for a custom application server (e.g. the Python HOOPS AI
+    // WebAPI on 8000). When set, the security group opens it - but only to the
+    // same CIDR as SSH (allowedSshCidr), never 0.0.0.0/0, because such an app may
+    // serve confidential CAD/model data. The preferred public path is still the
+    // NGINX reverse proxy on 80/443 (the app's install script adds its own proxy
+    // location); appPort is mainly for direct, IP-restricted testing.
+    const appPortCtx = this.node.tryGetContext('appPort') ?? process.env.APP_PORT;
+    const appPort = appPortCtx !== undefined ? Number(appPortCtx) : undefined;
+
     // ------------------------------------------------------------------
     // Networking: minimal public VPC (single AZ, no NAT to keep cost low)
     // ------------------------------------------------------------------
@@ -65,6 +74,14 @@ export class HvwCdkStack extends cdk.Stack {
     sg.addIngressRule(ec2.Peer.ipv4(sshCidr), ec2.Port.tcp(22), 'SSH');
     sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'HTTP');
     sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS');
+    if (appPort !== undefined && !Number.isNaN(appPort)) {
+      // Restrict the app port to the SSH CIDR (not the whole internet).
+      sg.addIngressRule(
+        ec2.Peer.ipv4(sshCidr),
+        ec2.Port.tcp(appPort),
+        `App port ${appPort} (restricted to allowedSshCidr)`,
+      );
+    }
 
     // ------------------------------------------------------------------
     // IAM role (Session Manager access, no bastion required)
@@ -145,68 +162,72 @@ export class HvwCdkStack extends cdk.Stack {
     // and hand its local path to assets/install-webapp.sh via WEBAPP_ARCHIVE.
     // This is INDEPENDENT of HVW_SDK_URL, but appended AFTER the SDK step so the
     // web-service package runs last (extraction overwrites files placed earlier).
+    // Helper: resolve a "supply either an already-uploaded s3://bucket/key OR a
+    // local archive path" pair to an S3 object URL the instance can download.
+    // For the S3 URI it grants the role s3:GetObject on exactly that object; for
+    // a local path it uploads a CDK asset (rejecting >~1.9 GiB files that would
+    // trip the 2 GiB fs.readFileSync limit during synth validation). Shared by
+    // the static web package and the Python app package below.
+    const resolvePackageToS3Url = (
+      assetId: string,
+      s3Uri: string | undefined,
+      localPath: string | undefined,
+      s3Label: string,
+      localLabel: string,
+    ): string | undefined => {
+      if (s3Uri && localPath) {
+        throw new Error(`Supply either ${s3Label} or ${localLabel}, not both.`);
+      }
+      if (s3Uri) {
+        const match = /^s3:\/\/([^/]+)\/(.+)$/.exec(s3Uri);
+        if (!match) {
+          throw new Error(`${s3Label} must be an s3://bucket/key URI, got: ${s3Uri}`);
+        }
+        const [, bucketName, objectKey] = match;
+        // Least privilege: read access to exactly this object, nothing else.
+        role.addToPrincipalPolicy(
+          new iam.PolicyStatement({
+            actions: ['s3:GetObject'],
+            resources: [`arn:${this.partition}:s3:::${bucketName}/${objectKey}`],
+          }),
+        );
+        return s3Uri;
+      }
+      if (localPath) {
+        const resolved = path.resolve(process.cwd(), localPath);
+        if (!fs.existsSync(resolved)) {
+          throw new Error(`${localLabel} points at a non-existent path: ${resolved}`);
+        }
+        // Guard against the 2 GiB CDK-asset limit. During synth CDK's validation
+        // reads each staged asset whole with fs.readFileSync, which throws
+        // ERR_FS_FILE_TOO_LARGE for files larger than 2 GiB.
+        const maxAssetBytes = 1.9 * 1024 * 1024 * 1024;
+        const bytes = fs.statSync(resolved).size;
+        if (bytes > maxAssetBytes) {
+          throw new Error(
+            `${localLabel} is ${(bytes / 1024 ** 3).toFixed(2)} GiB, which is too large to ` +
+              'bundle as a CDK asset (Node cannot fs.readFileSync files larger than 2 GiB ' +
+              `during synth). Upload the archive to your own S3 bucket and pass ${s3Label} instead.`,
+          );
+        }
+        const asset = new s3assets.Asset(this, assetId, { path: resolved });
+        asset.grantRead(role);
+        return asset.s3ObjectUrl;
+      }
+      return undefined;
+    };
+
     const webappS3Uri =
       (this.node.tryGetContext('webappS3Uri') as string) ?? process.env.WEBAPP_S3_URI;
     const webappPackage =
       (this.node.tryGetContext('webappPackage') as string) ?? process.env.WEBAPP_PACKAGE;
-
-    if (webappS3Uri && webappPackage) {
-      throw new Error(
-        'Supply either webappS3Uri (s3://bucket/key of a pre-uploaded archive) or ' +
-          'webappPackage (local archive path), not both.',
-      );
-    }
-
-    // Resolve the archive to an S3 location the instance downloads from. For a
-    // local package this is the uploaded CDK asset; for an S3 URI it is the
-    // object you pre-uploaded (and the role is granted read access to it).
-    let webappS3ObjectUrl: string | undefined;
-
-    if (webappS3Uri) {
-      const match = /^s3:\/\/([^/]+)\/(.+)$/.exec(webappS3Uri);
-      if (!match) {
-        throw new Error(
-          `webappS3Uri / WEBAPP_S3_URI must be an s3://bucket/key URI, got: ${webappS3Uri}`,
-        );
-      }
-      const [, bucketName, objectKey] = match;
-      // Least privilege: read access to exactly this object, nothing else.
-      role.addToPrincipalPolicy(
-        new iam.PolicyStatement({
-          actions: ['s3:GetObject'],
-          resources: [`arn:${this.partition}:s3:::${bucketName}/${objectKey}`],
-        }),
-      );
-      webappS3ObjectUrl = webappS3Uri;
-    } else if (webappPackage) {
-      const resolvedPackagePath = path.resolve(process.cwd(), webappPackage);
-      if (!fs.existsSync(resolvedPackagePath)) {
-        throw new Error(
-          `webappPackage / WEBAPP_PACKAGE points at a non-existent path: ${resolvedPackagePath}`,
-        );
-      }
-
-      // Guard against the 2 GiB CDK-asset limit. During synth CDK's validation
-      // reads each staged asset whole with fs.readFileSync, which throws
-      // ERR_FS_FILE_TOO_LARGE for files larger than 2 GiB. Reject early with an
-      // actionable message pointing at the S3-URI path for large archives.
-      const maxAssetBytes = 1.9 * 1024 * 1024 * 1024;
-      const packageBytes = fs.statSync(resolvedPackagePath).size;
-      if (packageBytes > maxAssetBytes) {
-        throw new Error(
-          `webappPackage is ${(packageBytes / 1024 ** 3).toFixed(2)} GiB, which is too ` +
-            'large to bundle as a CDK asset (Node cannot fs.readFileSync files larger ' +
-            'than 2 GiB during synth). Upload the archive to your own S3 bucket and ' +
-            'pass webappS3Uri=s3://bucket/key instead.',
-        );
-      }
-
-      const webappAsset = new s3assets.Asset(this, 'WebappPackage', {
-        path: resolvedPackagePath,
-      });
-      webappAsset.grantRead(role);
-      webappS3ObjectUrl = webappAsset.s3ObjectUrl;
-    }
+    const webappS3ObjectUrl = resolvePackageToS3Url(
+      'WebappPackage',
+      webappS3Uri,
+      webappPackage,
+      'webappS3Uri / WEBAPP_S3_URI',
+      'webappPackage / WEBAPP_PACKAGE',
+    );
 
     if (webappS3ObjectUrl) {
       const webappInstallScript = fs.readFileSync(
@@ -225,6 +246,43 @@ export class HvwCdkStack extends cdk.Stack {
         `aws s3 cp '${webappS3ObjectUrl}' '${localArchive}'`,
         `export WEBAPP_ARCHIVE='${localArchive}'`,
         webappInstallScript,
+      );
+    }
+
+    // Optionally deploy a Python application server (e.g. the HOOPS AI WebAPI).
+    // Independent of HVW_SDK_URL and the static webapp above: supply the app's
+    // redistributable via pyAppS3Uri / PYAPP_S3_URI (pre-uploaded s3://bucket/key,
+    // recommended for multi-GB packages) or pyAppPackage / PYAPP_PACKAGE (local
+    // path). CDK downloads it, then runs assets/install-pyapp.sh, which builds a
+    // venv, installs deps and starts a systemd service that uses the headless
+    // Xvfb display (DISPLAY=:99) set up in user-data.sh. install-pyapp.sh is a
+    // TEMPLATE pre-filled for the HOOPS AI layout - adapt it for other apps.
+    const pyAppS3Uri =
+      (this.node.tryGetContext('pyAppS3Uri') as string) ?? process.env.PYAPP_S3_URI;
+    const pyAppPackage =
+      (this.node.tryGetContext('pyAppPackage') as string) ?? process.env.PYAPP_PACKAGE;
+    const pyAppS3ObjectUrl = resolvePackageToS3Url(
+      'PyAppPackage',
+      pyAppS3Uri,
+      pyAppPackage,
+      'pyAppS3Uri / PYAPP_S3_URI',
+      'pyAppPackage / PYAPP_PACKAGE',
+    );
+
+    if (pyAppS3ObjectUrl) {
+      const pyAppInstallScript = fs.readFileSync(
+        path.join(__dirname, '..', 'assets', 'install-pyapp.sh'),
+        'utf8',
+      );
+      const pyAppPort =
+        appPort !== undefined && !Number.isNaN(appPort) ? appPort : 8000;
+      const localArchive = '/tmp/pyapp-package/archive';
+      userData.addCommands(
+        'mkdir -p /tmp/pyapp-package',
+        `aws s3 cp '${pyAppS3ObjectUrl}' '${localArchive}'`,
+        `export PYAPP_ARCHIVE='${localArchive}'`,
+        `export PYAPP_PORT='${pyAppPort}'`,
+        pyAppInstallScript,
       );
     }
 

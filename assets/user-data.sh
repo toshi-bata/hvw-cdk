@@ -28,13 +28,21 @@ export DEBIAN_FRONTEND=noninteractive
 # dropped the `awscli` package, so `apt-get install awscli` aborts the whole
 # install with "Package 'awscli' has no installation candidate". We install the
 # official AWS CLI v2 below instead (used by the webapp S3 download step).
+#
+# Headless OpenGL: HOOPS server-side rendering / conversion (SC server, and
+# Python apps such as HOOPS AI) need an OpenGL + display context even on a box
+# with no monitor attached. Without it the HOOPS Converter dies with SIGSEGV
+# (exit -11) - it is a missing DISPLAY, not a license problem. We install the
+# GL / OSMesa runtime plus Xvfb (a virtual framebuffer X server) here, and run a
+# system-wide `xvfb.service` (section 1c) that provides DISPLAY=:99 at boot.
 apt-get update
 apt-get upgrade -y
 apt-get install -y \
     nginx \
     certbot python3-certbot-nginx \
     unzip build-essential curl \
-    libglu1-mesa mesa-utils xserver-xorg xinit
+    libglu1-mesa libgl1 libosmesa6 xvfb \
+    libxrender1 libxext6 libsm6 mesa-utils
 
 # 1b. AWS CLI v2 (official installer). Provides `aws` at /usr/local/bin/aws,
 # used by the webapp download step (`aws s3 cp`) with the instance role creds.
@@ -46,6 +54,32 @@ if ! command -v aws >/dev/null 2>&1; then
     /tmp/aws/install --update
     rm -rf /tmp/awscliv2.zip /tmp/aws
 fi
+
+# 1c. Headless virtual display (Xvfb) as a system service.
+#
+# HOOPS license validation and rendering/inference expect a display to exist.
+# Running Xvfb on :99 as its own long-lived systemd unit gives every HOOPS
+# workload on this box a ready-to-use DISPLAY=:99 immediately after boot - no
+# manual `Xvfb ... &` before launching anything. Consumers (the SC server, or a
+# Python app service) just set `Environment=DISPLAY=:99` and
+# `Requires=xvfb.service`. Pattern from the TechSoft3D forum article
+# "running HOOPS AI headless on Ubuntu 24.04 (EC2)".
+cat > /etc/systemd/system/xvfb.service <<'XVFB_EOF'
+[Unit]
+Description=Virtual Framebuffer X Server (headless DISPLAY=:99 for HOOPS)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x960x24
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+XVFB_EOF
+
+systemctl daemon-reload
+systemctl enable --now xvfb.service
 
 # 2. Directories: static web root and the SDK install root
 mkdir -p /var/www/html /opt/hvw
@@ -103,6 +137,13 @@ server {
     location ~ ^/httpproxy/(11182|11180)/(.*)$ {
         proxy_pass http://127.0.0.1:$1/$2;
     }
+
+    # App-owned reverse-proxy locations. A Python/app install script (e.g.
+    # assets/install-pyapp.sh) drops its own `location` snippet(s) into
+    # /etc/nginx/pyapp-locations/ to expose the app through this front end on
+    # 80/443 - without loosening the SC-server whitelist above. The wildcard
+    # include is optional: with no snippet present it simply matches nothing.
+    include /etc/nginx/pyapp-locations/*.conf;
 
     client_max_body_size 200M;
 }

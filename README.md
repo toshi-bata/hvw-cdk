@@ -134,6 +134,9 @@ aws sts get-caller-identity   # Account が返れば OK。失効時のみ aws ss
 | `hvwLicense`      | （未指定）    | HVW ライセンスキー。指定すると SDK の `server/node/Config.js` に埋め込まれた評価ライセンスを上書き（`sdkUrl` による自動インストール時のみ有効）。**未指定なら SDK 同梱の評価ライセンスをそのまま使用**。環境変数 `HVW_LICENSE` でも指定可 |
 | `webappPackage`   | （未指定）    | 独自 Web サービスの再頒布パッケージ（圧縮ファイル）への**ローカルパス**。指定すると CDK が S3 アセットとして自動アップロードし、デプロイ時にサーバへ展開。環境変数 `WEBAPP_PACKAGE` でも指定可。**約 1.9 GiB を超えるファイルは指定不可**（CDK アセットは synth 時に丸ごと読み込むため 2 GiB 制約に抵触。大容量は `webappS3Uri` を使用）。**`sdkUrl` の有無に影響されず独立に動作**（下記「独自 Web サービスの同梱デプロイ」参照） |
 | `webappS3Uri`     | （未指定）    | 事前に自分の S3 バケットへアップロード済みの再頒布パッケージの `s3://bucket/key` URI。CDK はアセット化せず、EC2 ロールに当該オブジェクトの `s3:GetObject` のみ付与して `aws s3 cp` で取得。**大容量（数 GB）向けの推奨方式**（2 GiB 制約・毎 synth の巨大コピーを回避）。環境変数 `WEBAPP_S3_URI` でも指定可。`webappPackage` とは**排他**（両方指定はエラー） |
+| `pyAppPackage`    | （未指定）    | Python アプリサーバー（例：HOOPS AI WebAPI）の再頒布パッケージへの**ローカルパス**。指定すると CDK が S3 アセット化して展開し、`assets/install-pyapp.sh` を実行。環境変数 `PYAPP_PACKAGE` でも指定可。`webappPackage` 同様 **約 1.9 GiB 上限**（超過は `pyAppS3Uri` を使用）。**`sdkUrl` / `webappPackage` とは独立**（下記「Python アプリサーバーの同梱デプロイ」参照） |
+| `pyAppS3Uri`      | （未指定）    | 事前アップロード済みの Python アプリ再頒布パッケージの `s3://bucket/key` URI。`webappS3Uri` と同じ仕組み（`s3:GetObject` のみ付与）。**大容量向けの推奨方式**。環境変数 `PYAPP_S3_URI` でも指定可。`pyAppPackage` とは**排他** |
+| `appPort`         | （未指定）    | アプリサーバーの待受 TCP ポート（例：`8000`）。指定すると Security Group で当該ポートを**`allowedSshCidr` と同じ CIDR にのみ**開放（インターネット全体には開けない）。`install-pyapp.sh` の systemd サービスとリバースプロキシもこのポートを使用。環境変数 `APP_PORT` でも指定可。**未指定でもリバースプロキシ経由（80/443）で公開可能**（既定ポートは 8000） |
 
 ### 自分のグローバル IP の調べ方（`allowedSshCidr` 用）
 
@@ -288,6 +291,62 @@ export WEBAPP_PACKAGE='/path/to/my-web-service.zip'
 > （`HVW_SDK_URL` と同様）。取得には EC2 ロールの権限で `aws s3 cp` を使うため、
 > UserData 側で `awscli` を導入しています。`webappS3Uri` を使う場合、ロールには
 > 指定したオブジェクトの `s3:GetObject` のみが付与されます（最小権限）。
+
+## Python アプリサーバーの同梱デプロイ（HOOPS AI など）
+
+静的な Web サービス（上記）とは別に、**HOOPS で描画・推論する Python アプリ
+サーバー**（例：開発中の HOOPS AI WebAPI）を同梱・自動起動できます。展開だけでは
+動かない（venv 構築・依存インストール・ヘッドレス表示・サービス化が必要な）
+アプリ向けの仕組みです。`HVW_SDK_URL` / `webappPackage` とは**完全に独立**しています。
+
+パッケージの渡し方は webapp と同じ**排他の 2 通り**です。
+
+1. **`PYAPP_S3_URI`（context `pyAppS3Uri`）＝ 事前アップロード済み S3 参照（大容量の推奨方式）**
+2. **`PYAPP_PACKAGE`（context `pyAppPackage`）＝ ローカルパス（約 1.9 GiB 以下）**
+
+展開後は `assets/install-pyapp.sh` が実行されます。これは **HOOPS AI 向けに記入済みの
+編集可能なテンプレート**で、既定では以下を行います。
+
+- **展開先は NGINX ルート外**（既定 `/opt/hoops-ai`）。`ubuntu` ユーザー所有に変更。
+- `python3-pip` / `python3.12-venv` / `p7zip-full` を導入し、`.webvenv` を作成して
+  `requirements.txt` をインストール。
+- **systemd サービス** `pyapp.service` を作成・起動。**ヘッドレス表示**
+  （`DISPLAY=:99`、UserData が起動する `xvfb.service`）を `Requires` し、
+  非 root（`ubuntu`）で `PYAPP_PORT`（既定 8000）を待受。
+- **リバースプロキシ公開**：`/etc/nginx/pyapp-locations/hoops-ai.conf` を配置し、
+  既存の NGINX フロント（80/443）の `/app/` を `127.0.0.1:PYAPP_PORT` へ転送。
+  **ポートをインターネットへ開けずに公開**できます（SC サーバーのポート
+  ホワイトリスト 11182/11180 は緩めません）。
+
+> **ヘッドレス対応**：本 CDK が作る EC2 は headless 前提で構成済みです。UserData が
+> OpenGL/OSMesa ランタイムと `Xvfb`（`xvfb.service`, `DISPLAY=:99`）を導入・常駐
+> させるため、HOOPS の描画・変換・ライセンス検証が DISPLAY 不在で SIGSEGV（exit
+> -11）することはありません。GPU（SSR）は別途 NVIDIA ドライバ導入が必要です。
+
+> **`appPort` について**：`-c appPort=8000` を渡すと、リバースプロキシに加えて
+> ポート 8000 を**`allowedSshCidr` と同じ CIDR にのみ**直接開放します（動作確認用）。
+> 本命はリバースプロキシ経由の公開なので、直接ポートを開けない運用も可能です
+> （その場合 `PYAPP_PORT` は既定の 8000 を使用）。
+
+> **モデル/重み・アプリ内部**：大容量 ML モデル（`*.ckpt` 等）の配置やアプリ固有の
+> 起動オプションは**インフラ側の責務ではありません**。HOOPS AI WebAPI 側の README に
+> 従って配置してください。`install-pyapp.sh` の `ExecStart` は forum 記事の
+> `main.py` パターンで記入していますが、`start_server.sh`（独自に Xvfb を起動）を
+> 使う場合のコメント例も併記しています（:99 の二重起動に注意）。
+
+```powershell
+# --- PowerShell (Windows) ---
+$env:PYAPP_S3_URI = 's3://my-bucket/pyapp/hoops_ai.zip'   # 大容量向け（推奨）
+# $env:PYAPP_PACKAGE = 'C:\path\to\hoops_ai.zip'          # 小容量向け
+# npx cdk deploy -c appPort=8000 -c allowedSshCidr=<自分のIP>/32 ...
+```
+
+```bash
+# --- bash (Linux/macOS) ---
+export PYAPP_S3_URI='s3://my-bucket/pyapp/hoops_ai.zip'   # 大容量向け（推奨）
+# export PYAPP_PACKAGE='/path/to/hoops_ai.zip'            # 小容量向け
+# npx cdk deploy -c appPort=8000 -c allowedSshCidr=<自分のIP>/32 ...
+```
 
 ## デプロイ手順
 
@@ -482,6 +541,7 @@ hvw-cdk/
 ├── assets/user-data.sh       # EC2 ブートストラップ（NGINX/certbot/systemd）
 ├── assets/install-sdk.sh     # SDK 自動ダウンロード・設置（sdkUrl 指定時に実行）
 ├── assets/install-webapp.sh  # 独自 Web サービス圧縮ファイルの展開（webappPackage 指定時に実行）
+├── assets/install-pyapp.sh   # Python アプリサーバーの展開・venv・systemd 化（pyAppPackage 指定時に実行）
 ├── test/hvw-cdk.test.ts      # スタックの簡易テスト
 └── README.md
 ```
