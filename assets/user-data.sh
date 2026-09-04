@@ -147,7 +147,17 @@ server {
         if ($pyapp_root = "") {
             return 404;
         }
-        proxy_set_header X-Real-IP $remote_addr;
+        # NOTE: nginx does NOT merge proxy_set_header across levels - defining
+        # any here discards the server-level ones (Host, Upgrade, Connection).
+        # They must be restated, or the app receives Host: 127.0.0.1:<port> and
+        # builds absolute URLs (e.g. thumbnail_url) pointing at its own loopback,
+        # which the browser then fails to load.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $hvw_connection;
         proxy_pass $pyapp_root;
     }
 
