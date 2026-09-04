@@ -230,10 +230,15 @@ export class HvwCdkStack extends cdk.Stack {
     );
 
     if (webappS3ObjectUrl) {
-      const webappInstallScript = fs.readFileSync(
-        path.join(__dirname, '..', 'assets', 'install-webapp.sh'),
-        'utf8',
-      );
+      // Upload install-webapp.sh as its own S3 asset and download it at boot
+      // instead of inlining it into user-data. EC2 caps user-data at 16 KB
+      // (raw), and inlining these multi-KB install scripts blows that budget;
+      // fetching them at runtime keeps user-data small no matter how many
+      // install scripts (webapp + pyapp) are combined.
+      const webappScriptAsset = new s3assets.Asset(this, 'WebappInstallScript', {
+        path: path.join(__dirname, '..', 'assets', 'install-webapp.sh'),
+      });
+      webappScriptAsset.grantRead(role);
 
       // Download the archive to the instance using the EC2 role credentials,
       // then hand the local path to install-webapp.sh via WEBAPP_ARCHIVE.
@@ -241,11 +246,13 @@ export class HvwCdkStack extends cdk.Stack {
       // s3 cp command is emitted explicitly. The EC2 default region from IMDS
       // matches the asset's / object's bucket region.)
       const localArchive = '/tmp/webapp-package/archive';
+      const localScript = '/tmp/install-webapp.sh';
       userData.addCommands(
         'mkdir -p /tmp/webapp-package',
         `aws s3 cp '${webappS3ObjectUrl}' '${localArchive}'`,
+        `aws s3 cp '${webappScriptAsset.s3ObjectUrl}' '${localScript}'`,
         `export WEBAPP_ARCHIVE='${localArchive}'`,
-        webappInstallScript,
+        `bash '${localScript}'`,
       );
     }
 
@@ -270,19 +277,23 @@ export class HvwCdkStack extends cdk.Stack {
     );
 
     if (pyAppS3ObjectUrl) {
-      const pyAppInstallScript = fs.readFileSync(
-        path.join(__dirname, '..', 'assets', 'install-pyapp.sh'),
-        'utf8',
-      );
+      // Upload install-pyapp.sh as its own S3 asset and download it at boot
+      // (see the webapp block above) to stay within EC2's 16 KB user-data cap.
+      const pyAppScriptAsset = new s3assets.Asset(this, 'PyAppInstallScript', {
+        path: path.join(__dirname, '..', 'assets', 'install-pyapp.sh'),
+      });
+      pyAppScriptAsset.grantRead(role);
       const pyAppPort =
         appPort !== undefined && !Number.isNaN(appPort) ? appPort : 8000;
       const localArchive = '/tmp/pyapp-package/archive';
+      const localScript = '/tmp/install-pyapp.sh';
       userData.addCommands(
         'mkdir -p /tmp/pyapp-package',
         `aws s3 cp '${pyAppS3ObjectUrl}' '${localArchive}'`,
+        `aws s3 cp '${pyAppScriptAsset.s3ObjectUrl}' '${localScript}'`,
         `export PYAPP_ARCHIVE='${localArchive}'`,
         `export PYAPP_PORT='${pyAppPort}'`,
-        pyAppInstallScript,
+        `bash '${localScript}'`,
       );
     }
 

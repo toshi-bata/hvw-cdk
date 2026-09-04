@@ -57,14 +57,14 @@ test('custom web-service package is deployed after sample.html and the SDK, inde
 
   const sampleIdx = userData.indexOf('containerId');
   const sdkIdx = userData.indexOf('HVW SDK installed under');
-  const webappIdx = userData.indexOf('WEBAPP_ARCHIVE is not set');
+  const webappIdx = userData.indexOf('/tmp/install-webapp.sh');
 
   // All three steps are present ...
   expect(sampleIdx).toBeGreaterThanOrEqual(0);
   expect(sdkIdx).toBeGreaterThanOrEqual(0);
   expect(webappIdx).toBeGreaterThanOrEqual(0);
-  // ... and the web-service package is extracted LAST (after sample.html and
-  // the SDK/demo-app), so it can overwrite/update those files.
+  // ... and the web-service package is fetched/extracted LAST (after sample.html
+  // and the SDK/demo-app), so it can overwrite/update those files.
   expect(webappIdx).toBeGreaterThan(sampleIdx);
   expect(webappIdx).toBeGreaterThan(sdkIdx);
 });
@@ -79,8 +79,8 @@ test('custom web-service package works without an SDK URL (independent of HVW_SD
   const instances = template.findResources('AWS::EC2::Instance');
   const userData = JSON.stringify(Object.values(instances)[0].Properties.UserData);
 
-  // The web-service extraction step is present even though sdkUrl is unset ...
-  expect(userData).toContain('WEBAPP_ARCHIVE is not set');
+  // The web-service install step is present even though sdkUrl is unset ...
+  expect(userData).toContain('/tmp/install-webapp.sh');
   // ... and the SDK step is absent.
   expect(userData).not.toContain('HVW SDK installed under');
 });
